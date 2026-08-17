@@ -1190,10 +1190,11 @@ describe("install.ps1 failure handling", () => {
   });
 
   runIfPowerShell("invokes launcher generation with the Windows profile home", () => {
-    const scriptWithoutEntryPoint = source.replace(ENTRYPOINT_RE, "");
+    const gitLauncherBody = extractFunctionBody(source, "Install-GitLauncher");
     const command = [
-      scriptWithoutEntryPoint,
-      "",
+      "function Install-GitLauncher {",
+      gitLauncherBody,
+      "}",
       "$originalHome = $env:HOME",
       "$env:HOME = 'C:\\other-home'",
       "$env:USERPROFILE = 'C:\\approved-home'",
@@ -1257,8 +1258,8 @@ describe("install.ps1 failure handling", () => {
         "    $script:LauncherEntryPath = $EntryPath",
         "    $launcherDir = Join-Path $env:USERPROFILE '.local\\bin'",
         "    New-Item -ItemType Directory -Force -Path $launcherDir | Out-Null",
-        "    $escapedNode = $NodePath.Replace('^', '^^').Replace('%', '%%')",
-        "    $escapedEntry = $EntryPath.Replace('^', '^^').Replace('%', '%%')",
+        "    $escapedNode = $NodePath.Replace('%', '%%')",
+        "    $escapedEntry = $EntryPath.Replace('%', '%%')",
         "    $launcher = @(",
         "      '@echo off'",
         "      'rem OpenClaw Git launcher'",
@@ -1288,8 +1289,8 @@ describe("install.ps1 failure handling", () => {
         '  if ($script:LauncherNodePath -ne $validatedNodePath) { throw "LauncherNode=$script:LauncherNodePath Expected=$validatedNodePath" }',
         '  if ($script:LauncherEntryPath -ne $entryPath) { throw "LauncherEntry=$script:LauncherEntryPath Expected=$entryPath" }',
         "  $wrapperPath = Join-Path $homeDir '.local\\bin\\openclaw.cmd'",
-        "  $cmdNodePath = $validatedNodePath.Replace('^', '^^').Replace('%', '%%')",
-        "  $cmdEntryPath = $entryPath.Replace('^', '^^').Replace('%', '%%')",
+        "  $cmdNodePath = $validatedNodePath.Replace('%', '%%')",
+        "  $cmdEntryPath = $entryPath.Replace('%', '%%')",
         '  $expectedLine = "`"$cmdNodePath`" `"$cmdEntryPath`" %*"',
         "  $wrapperLines = @(Get-Content -LiteralPath $wrapperPath)",
         '  if ($wrapperLines[-1] -ne $expectedLine) { throw "Wrapper=$($wrapperLines[-1]) Expected=$expectedLine" }',

@@ -342,7 +342,7 @@ jobs:
             Copy-Item -LiteralPath $wrapperPath -Destination (Join-Path $artifactDir "openclaw-installed.cmd")
             $wrapper = Get-Content -LiteralPath $wrapperPath -Raw
             $escapedPaths =
-              $wrapper.Contains("^^openclaw_proof_caret^^") -and
+              $wrapper.Contains("^openclaw_proof_caret^") -and
               $wrapper.Contains("%%OPENCLAW_PROOF_PERCENT%%") -and
               $wrapper.Contains("!openclaw_proof_bang!") -and
               $wrapper.Contains("setlocal DisableDelayedExpansion")
@@ -366,7 +366,7 @@ jobs:
             $wrapper = Get-Content -LiteralPath $wrapperPath -Raw
             $legacyLauncherMigrated =
               $wrapper.Contains("rem OpenClaw Git launcher") -and
-              $wrapper.Contains("^^openclaw_proof_caret^^") -and
+              $wrapper.Contains("^openclaw_proof_caret^") -and
               $wrapper.Contains("%%OPENCLAW_PROOF_PERCENT%%") -and
               $wrapper.Contains("!openclaw_proof_bang!") -and
               -not $wrapper.Contains("`r`nnode `"")

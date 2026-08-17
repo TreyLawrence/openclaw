@@ -39,8 +39,8 @@ describe("reconcileWindowsGitLauncher", () => {
         });
 
         expect(launcher).toContain("setlocal DisableDelayedExpansion");
-        expect(launcher).toContain(fixture.nodePath.replaceAll("^", "^^").replaceAll("%", "%%"));
-        expect(launcher).toContain(fixture.entryPath.replaceAll("^", "^^").replaceAll("%", "%%"));
+        expect(launcher).toContain(fixture.nodePath.replaceAll("%", "%%"));
+        expect(launcher).toContain(fixture.entryPath.replaceAll("%", "%%"));
         expect(launcher).toContain(" & (approved)!");
       },
     );
@@ -118,7 +118,7 @@ describe("reconcileWindowsGitLauncher", () => {
       ).resolves.toEqual({ status: "updated", launcherPath: fixture.launcherPath });
       expect(
         decodeWindowsLauncherScript({ buffer: await fs.readFile(fixture.launcherPath) }),
-      ).toContain("replacement ^^^^ %%%% runtime");
+      ).toContain("replacement ^^ %%%% runtime");
       await expect(
         reconcileWindowsGitLauncher({
           root,

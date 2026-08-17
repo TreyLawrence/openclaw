@@ -22,9 +22,9 @@ function escapeCmdLiteral(value: string): string {
   if (value.includes("\u0000") || /[\r\n"]/u.test(value)) {
     throw new Error("Windows Git launcher paths cannot contain NUL, quotes, CR, or LF");
   }
-  // Batch files parse carets inside quoted command arguments. Delayed expansion
-  // is disabled below, so bangs remain literal while carets and percents double.
-  return value.replaceAll("^", "^^").replaceAll("%", "%%");
+  // Quoted batch arguments preserve carets, and delayed expansion is disabled
+  // below so bangs stay literal. Percents still double to prevent expansion.
+  return value.replaceAll("%", "%%");
 }
 
 /** Renders the persistent Windows Git launcher shared by install and update repair. */
@@ -63,7 +63,7 @@ function isManagedLauncherForEntry(content: string, entryPath: string): boolean 
   if (!encodedEntryPath) {
     return false;
   }
-  const decodedEntryPath = encodedEntryPath.replaceAll("^^", "^").replaceAll("%%", "%");
+  const decodedEntryPath = encodedEntryPath.replaceAll("%%", "%");
   return (
     escapeCmdLiteral(decodedEntryPath) === encodedEntryPath &&
     normalizeWindowsPath(decodedEntryPath) === normalizedEntryPath
