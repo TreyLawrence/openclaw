@@ -479,6 +479,18 @@ jobs:
           }
           exit 0
 
+      - name: Build native Scheduled Task proof runtime
+        if: ${{ inputs.run_windows_ci }}
+        timeout-minutes: 20
+        shell: bash
+        env:
+          CI: true
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          set -euo pipefail
+          export PATH="$NODE_BIN:$PATH"
+          pnpm build
+
       - name: Run native Scheduled Task lifecycle proof
         id: native_schtasks
         if: ${{ inputs.run_windows_ci }}
