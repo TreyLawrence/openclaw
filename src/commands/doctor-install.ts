@@ -53,6 +53,11 @@ export async function repairWindowsGitLauncher(root: string | null, shouldRepair
       `- ${result.launcherPath} does not use the current validated Node runtime. Run: openclaw doctor --fix`,
       "Install",
     );
+  } else if (result.status === "needs-reinstall") {
+    note(
+      `- ${result.launcherPath} cannot be safely migrated from the current Node runtime. Re-run the OpenClaw installer.`,
+      "Install",
+    );
   } else if (result.status === "updated") {
     note(`- Updated ${result.launcherPath} to use the validated Node runtime.`, "Install");
   }

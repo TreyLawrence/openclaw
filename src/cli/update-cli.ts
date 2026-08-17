@@ -238,6 +238,11 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/update", "docs.openclaw.ai/cli/up
           repair: true,
           create: true,
         });
+        if (result.status === "needs-reinstall") {
+          throw new Error(
+            "The current Node runtime is not supported for a durable Windows Git launcher; re-run the OpenClaw installer",
+          );
+        }
         if (result.status === "skipped") {
           throw new Error(
             result.reason === "not-windows"

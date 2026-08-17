@@ -1239,7 +1239,7 @@ describe("install.ps1 failure handling", () => {
         "  $repo = Join-Path $sandbox 'repo with spaces'",
         "  $entryDir = Join-Path $repo 'dist'",
         "  $entryPath = Join-Path $repo 'dist\\\\entry.js'",
-        "  $homeDir = Join-Path $sandbox 'home with spaces'",
+        "  $homeDir = Join-Path $testRoot 'home with spaces'",
         "  New-Item -ItemType Directory -Force -Path (Join-Path $repo '.git'), $entryDir, $homeDir | Out-Null",
         "  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)",
         "  [System.IO.File]::WriteAllText($entryPath, 'process.stdout.write(\"approved-node:\" + process.execPath);', $utf8NoBom)",

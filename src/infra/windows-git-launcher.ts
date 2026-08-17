@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { hasErrnoCode } from "./errors.js";
 import { resolveRequiredOsHomeDir } from "./home-dir.js";
+import { resolveNodeRuntimeInfo } from "./node-runtime-info.js";
 import { replaceFileAtomic } from "./replace-file.js";
 import { resolveStableNodePath } from "./stable-node-path.js";
 import {
@@ -14,6 +15,7 @@ const WINDOWS_GIT_LAUNCHER_MARKER = "rem OpenClaw Git launcher";
 
 type WindowsGitLauncherReconcileResult =
   | { status: "skipped"; reason: "not-windows" | "missing" | "foreign" }
+  | { status: "needs-reinstall"; launcherPath: string }
   | { status: "needs-repair"; launcherPath: string }
   | { status: "unchanged"; launcherPath: string }
   | { status: "created" | "updated"; launcherPath: string };
@@ -121,7 +123,15 @@ export async function reconcileWindowsGitLauncher(params: {
     return { status: "unchanged", launcherPath };
   } else if (!isManagedLauncherForEntry(current, entryPath)) {
     return { status: "skipped", reason: "foreign" };
-  } else if (!params.repair) {
+  }
+
+  // A legacy PATH launcher can start Doctor through an arbitrary shadow Node.
+  // Never turn that process into durable launcher authority without reproving it.
+  const runtime = await resolveNodeRuntimeInfo(nodePath);
+  if (!runtime.supported) {
+    return { status: "needs-reinstall", launcherPath };
+  }
+  if (current !== null && !params.repair) {
     return { status: "needs-repair", launcherPath };
   }
 

@@ -1,10 +1,16 @@
 // Windows Git launcher tests cover rendering, installer creation, and Doctor migration ownership.
 import fs from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { withTestDir } from "../test-helpers/temp-dir.js";
 import { reconcileWindowsGitLauncher } from "./windows-git-launcher.js";
 import { decodeWindowsLauncherScript } from "./windows-launcher-encoding.js";
+
+const resolveNodeRuntimeInfo = vi.hoisted(() => vi.fn());
+
+vi.mock("./node-runtime-info.js", () => ({
+  resolveNodeRuntimeInfo,
+}));
 
 async function createLauncherFixture(root: string) {
   const nodePath = path.join(root, "runtime", "node.exe");
@@ -19,6 +25,16 @@ async function createLauncherFixture(root: string) {
 }
 
 describe("reconcileWindowsGitLauncher", () => {
+  beforeEach(() => {
+    resolveNodeRuntimeInfo.mockReset();
+    resolveNodeRuntimeInfo.mockResolvedValue({
+      nodeVersion: "24.15.0",
+      sqliteVersion: "3.51.3",
+      nodeSharedSqlite: false,
+      supported: true,
+    });
+  });
+
   it("preserves quoted CMD metacharacters and escapes expansion", async () => {
     await withTestDir(
       {
@@ -128,6 +144,30 @@ describe("reconcileWindowsGitLauncher", () => {
           nodePath: replacementNodePath,
         }),
       ).resolves.toEqual({ status: "unchanged", launcherPath: fixture.launcherPath });
+    });
+  });
+
+  it("leaves a legacy launcher unchanged when the selected runtime is unsupported", async () => {
+    await withTestDir({ prefix: "openclaw-windows-git-launcher-" }, async (root) => {
+      const fixture = await createLauncherFixture(root);
+      const legacy = `@echo off\r\nnode "${fixture.entryPath}" %*\r\n`;
+      await fs.writeFile(fixture.launcherPath, legacy, "utf8");
+      resolveNodeRuntimeInfo.mockResolvedValue({
+        nodeVersion: "24.14.0",
+        sqliteVersion: "3.51.2",
+        nodeSharedSqlite: false,
+        supported: false,
+      });
+
+      await expect(
+        reconcileWindowsGitLauncher({
+          root,
+          repair: true,
+          platform: "win32",
+          ...fixture,
+        }),
+      ).resolves.toEqual({ status: "needs-reinstall", launcherPath: fixture.launcherPath });
+      await expect(fs.readFile(fixture.launcherPath, "utf8")).resolves.toBe(legacy);
     });
   });
 

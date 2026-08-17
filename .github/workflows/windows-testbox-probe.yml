@@ -59,6 +59,7 @@ jobs:
         shell: pwsh
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ inputs.target_ref || github.ref }}
@@ -286,11 +287,12 @@ jobs:
         timeout-minutes: 20
         shell: pwsh
         env:
-          EXPECTED_REF: ${{ inputs.target_ref }}
+          EXPECTED_HEAD: ${{ steps.checkout.outputs.commit }}
         run: |
           $ErrorActionPreference = "Stop"
           $artifactDir = Join-Path $env:GITHUB_WORKSPACE ".artifacts\windows-git-install"
           $proofRoot = Join-Path $env:RUNNER_TEMP "openclaw-git-proof-^openclaw_proof_caret^-%OPENCLAW_PROOF_PERCENT%-!openclaw_proof_bang!"
+          $proofHome = Join-Path $env:RUNNER_TEMP "openclaw-git-proof-home-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $originalHome = $env:HOME
           $originalPath = $env:Path
           $originalUserProfile = $env:USERPROFILE
@@ -302,9 +304,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
           try {
             $head = (git rev-parse HEAD).Trim()
-            $expectedHead = (git rev-parse --verify "$($env:EXPECTED_REF)^{commit}").Trim()
-            if ($LASTEXITCODE -ne 0 -or $head -ne $expectedHead) {
-              throw "Checked out $head, expected $env:EXPECTED_REF at $expectedHead."
+            if ($head -ne $env:EXPECTED_HEAD) {
+              throw "Checked out $head, expected checkout commit $env:EXPECTED_HEAD."
             }
 
             git worktree add --detach --force -- $proofRepo $head | Out-Host
@@ -314,7 +315,6 @@ jobs:
             $proofWorktreeAdded = $true
 
             $nodeSource = (Get-Command node -ErrorAction Stop).Source
-            $proofHome = Join-Path $proofRoot "home"
             New-Item -ItemType Directory -Force -Path $nodeDir, $proofHome | Out-Null
             $validatedNode = Join-Path $nodeDir "node.exe"
             Copy-Item -LiteralPath $nodeSource -Destination $validatedNode
@@ -448,6 +448,7 @@ jobs:
               git worktree prune
             }
             Remove-Item -LiteralPath $proofRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $proofHome -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
           }
 

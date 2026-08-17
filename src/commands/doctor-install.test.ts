@@ -97,4 +97,18 @@ describe("repairWindowsGitLauncher", () => {
     });
     expect(note).toHaveBeenCalledWith(expect.stringContaining("Updated"), "Install");
   });
+
+  it("directs unsupported legacy-launcher runtimes to the installer", async () => {
+    reconcileWindowsGitLauncher.mockResolvedValue({
+      status: "needs-reinstall",
+      launcherPath: "C:\\Users\\alice\\.local\\bin\\openclaw.cmd",
+    });
+
+    await repairWindowsGitLauncher("C:\\Users\\alice\\openclaw", true);
+
+    expect(note).toHaveBeenCalledWith(
+      expect.stringContaining("Re-run the OpenClaw installer"),
+      "Install",
+    );
+  });
 });
