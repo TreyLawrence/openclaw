@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { hasErrnoCode } from "./errors.js";
 import { resolveRequiredOsHomeDir } from "./home-dir.js";
 import { resolveNodeRuntimeInfo } from "./node-runtime-info.js";
@@ -94,12 +95,16 @@ export async function reconcileWindowsGitLauncher(params: {
   if ((params.platform ?? process.platform) !== "win32") {
     return { status: "skipped", reason: "not-windows" };
   }
+  const env = params.env ?? process.env;
   const nodePath = await resolveStableNodePath(params.nodePath ?? process.execPath);
   const entryPath = params.entryPath ?? path.join(params.root, "dist", "entry.js");
+  const userProfile = normalizeOptionalString(env.USERPROFILE);
   const launcherPath =
     params.launcherPath ??
     path.join(
-      resolveRequiredOsHomeDir(params.env ?? process.env, params.homedir ?? os.homedir),
+      userProfile
+        ? path.resolve(userProfile)
+        : resolveRequiredOsHomeDir(env, params.homedir ?? os.homedir),
       ".local",
       "bin",
       "openclaw.cmd",

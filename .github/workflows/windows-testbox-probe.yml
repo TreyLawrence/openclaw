@@ -293,6 +293,7 @@ jobs:
           $artifactDir = Join-Path $env:GITHUB_WORKSPACE ".artifacts\windows-git-install"
           $proofRoot = Join-Path $env:RUNNER_TEMP "openclaw-git-proof-^openclaw_proof_caret^-%OPENCLAW_PROOF_PERCENT%-!openclaw_proof_bang!"
           $proofHome = Join-Path $env:RUNNER_TEMP "openclaw-git-proof-home-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $proofShellHome = Join-Path $env:RUNNER_TEMP "openclaw-git-proof-shell-home-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $originalHome = $env:HOME
           $originalPath = $env:Path
           $originalUserProfile = $env:USERPROFILE
@@ -315,13 +316,16 @@ jobs:
             $proofWorktreeAdded = $true
 
             $nodeSource = (Get-Command node -ErrorAction Stop).Source
-            New-Item -ItemType Directory -Force -Path $nodeDir, $proofHome | Out-Null
+            New-Item -ItemType Directory -Force -Path $nodeDir, $proofHome, $proofShellHome | Out-Null
             $validatedNode = Join-Path $nodeDir "node.exe"
             Copy-Item -LiteralPath $nodeSource -Destination $validatedNode
 
-            $env:HOME = $proofHome
+            $env:HOME = $proofShellHome
             $env:USERPROFILE = $proofHome
             $env:Path = "$nodeDir;$originalPath"
+            if ($env:HOME -ieq $env:USERPROFILE) {
+              throw "Windows launcher proof requires divergent HOME and USERPROFILE paths."
+            }
             $resolvedNode = (& powershell.exe -NoProfile -Command '(Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source').Trim()
             if ($LASTEXITCODE -ne 0 -or $resolvedNode -ine $validatedNode) {
               throw "Child PowerShell resolved Node to '$resolvedNode', expected '$validatedNode'."
@@ -449,6 +453,7 @@ jobs:
             }
             Remove-Item -LiteralPath $proofRoot -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $proofHome -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $proofShellHome -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
           }
 

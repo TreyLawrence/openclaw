@@ -147,6 +147,35 @@ describe("reconcileWindowsGitLauncher", () => {
     });
   });
 
+  it("repairs the installer-owned USERPROFILE launcher when HOME differs", async () => {
+    await withTestDir({ prefix: "openclaw-windows-git-launcher-" }, async (root) => {
+      const fixture = await createLauncherFixture(root);
+      const userProfile = path.join(root, "windows-profile");
+      const shellHome = path.join(root, "git-bash-home");
+      const launcherPath = path.join(userProfile, ".local", "bin", "openclaw.cmd");
+      const legacy = `@echo off\r\nnode "${fixture.entryPath}" %*\r\n`;
+      await fs.mkdir(path.dirname(launcherPath), { recursive: true });
+      await fs.writeFile(launcherPath, legacy, "utf8");
+
+      await expect(
+        reconcileWindowsGitLauncher({
+          root,
+          repair: true,
+          platform: "win32",
+          env: { HOME: shellHome, USERPROFILE: userProfile },
+          nodePath: fixture.nodePath,
+          entryPath: fixture.entryPath,
+        }),
+      ).resolves.toEqual({ status: "updated", launcherPath });
+      expect(decodeWindowsLauncherScript({ buffer: await fs.readFile(launcherPath) })).toContain(
+        "rem OpenClaw Git launcher",
+      );
+      await expect(
+        fs.stat(path.join(shellHome, ".local", "bin", "openclaw.cmd")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    });
+  });
+
   it("leaves a legacy launcher unchanged when the selected runtime is unsupported", async () => {
     await withTestDir({ prefix: "openclaw-windows-git-launcher-" }, async (root) => {
       const fixture = await createLauncherFixture(root);
