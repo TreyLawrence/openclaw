@@ -1640,6 +1640,7 @@ async function createChatPickerScenario(
     featureMethods: [
       "browser.request",
       "chat.abort",
+      "config.schema",
       "chat.metadata",
       "chat.startup",
       "question.list",
