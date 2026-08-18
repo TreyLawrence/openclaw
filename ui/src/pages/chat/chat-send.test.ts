@@ -20,6 +20,7 @@ import {
   createTestGatewayClient,
   type GatewayRequestHandler,
 } from "../../test-helpers/gateway-client.ts";
+import { gatewayHelloForMethods } from "../../test-helpers/gateway-methods.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import {
@@ -380,9 +381,7 @@ describe("refreshChat", () => {
   it("uses prepared models delivered with startup metadata", async () => {
     const startup = createDeferred<unknown>();
     const host = makeChatHost({
-      hello: {
-        features: { methods: ["chat.metadata", "chat.startup"] },
-      } as TestChatHost["hello"],
+      hello: gatewayHelloForMethods(["chat.metadata", "chat.startup"], []),
       requestHandlers: {
         "chat.startup": () => startup.promise,
       },
@@ -431,9 +430,7 @@ describe("refreshChat", () => {
     const startup = createDeferred<unknown>();
     const host = makeChatHost({
       chatModelSwitchPromises: {},
-      hello: {
-        features: { methods: ["chat.metadata", "chat.startup"] },
-      } as TestChatHost["hello"],
+      hello: gatewayHelloForMethods(["chat.metadata", "chat.startup"], []),
       requestHandlers: {
         "chat.startup": () => startup.promise,
       },
@@ -514,9 +511,7 @@ describe("refreshChat", () => {
       {
         sessionKey: "global",
         hello: {
-          type: "hello-ok" as const,
-          protocol: 4,
-          auth: { role: "operator" as const, scopes: [] },
+          ...gatewayHelloForMethods([], []),
           snapshot: { sessionDefaults: { defaultAgentId: "ops" } },
         },
       },
@@ -783,6 +778,8 @@ describe("refreshChatAvatar", () => {
     await loadChatHelpers();
   });
 
+  const pairedDeviceHello = gatewayHelloForMethods([], []);
+
   it.each([
     {
       name: "uses a route-relative avatar endpoint before basePath bootstrap finishes",
@@ -799,7 +796,10 @@ describe("refreshChatAvatar", () => {
       overrides: {
         settings: { token: "session-token" },
         password: "shared-password",
-        hello: { auth: { deviceToken: "device-token" } } as ChatHost["hello"],
+        hello: {
+          ...pairedDeviceHello,
+          auth: { ...pairedDeviceHello.auth, deviceToken: "device-token" },
+        },
       },
     },
     {
@@ -2219,9 +2219,7 @@ describe("handleSendChat", () => {
       assistantAgentId: "work",
       chatMessage: "send to the agent main session",
       hello: {
-        type: "hello-ok",
-        protocol: 4,
-        auth: { role: "operator", scopes: [] },
+        ...gatewayHelloForMethods([], []),
         snapshot: {
           sessionDefaults: {
             defaultAgentId: "main",
@@ -4608,12 +4606,7 @@ describe("handleSendChat", () => {
       chatQueue: [item],
       connectionEpoch: 1,
       confirmConversationReset: vi.fn(async () => await confirmation.promise),
-      hello: {
-        type: "hello-ok",
-        protocol: 4,
-        auth: { role: "operator", scopes: ["operator.admin"] },
-        features: { methods: ["chat.send"] },
-      },
+      hello: gatewayHelloForMethods(["chat.send"]),
     });
     admitHostQueueItems(host);
 
@@ -4647,12 +4640,7 @@ describe("handleSendChat", () => {
       chatQueue: [item],
       connectionEpoch: 1,
       confirmConversationReset: vi.fn(async () => true),
-      hello: {
-        type: "hello-ok",
-        protocol: 4,
-        auth: { role: "operator", scopes: ["operator.admin"] },
-        features: { methods: ["chat.send"] },
-      },
+      hello: gatewayHelloForMethods(["chat.send"]),
     });
     const refreshSessions = vi.spyOn(host.sessions, "refresh");
     admitHostQueueItems(host);
@@ -4721,12 +4709,7 @@ describe("handleSendChat", () => {
       },
       chatQueue: [item],
       confirmConversationReset: vi.fn(async () => true),
-      hello: {
-        type: "hello-ok",
-        protocol: 4,
-        auth: { role: "operator", scopes: ["operator.admin"] },
-        features: { methods: ["chat.send"] },
-      },
+      hello: gatewayHelloForMethods(["chat.send"]),
     });
     admitHostQueueItems(host);
 
@@ -5809,6 +5792,7 @@ describe("handleSendChat", () => {
       requestHandlers: {
         "skills.proposals.requestRevision": () => sent.promise,
       },
+      hello: gatewayHelloForMethods(["skills.proposals.requestRevision"]),
       chatMessage: "keep my draft",
     });
     (host as ChatHost & { currentSessionId?: string }).currentSessionId = "session-current";
@@ -5858,6 +5842,7 @@ describe("handleSendChat", () => {
       requestHandlers: {
         "skills.proposals.requestRevision": () => sent.promise,
       },
+      hello: gatewayHelloForMethods(["skills.proposals.requestRevision"]),
     });
 
     const send = handleSendChat(host, "Keep the source connection", {
@@ -5890,6 +5875,7 @@ describe("handleSendChat", () => {
       requestHandlers: {
         "skills.proposals.requestRevision": () => sent.promise,
       },
+      hello: gatewayHelloForMethods(["skills.proposals.requestRevision"]),
     });
 
     const send = handleSendChat(host, "Keep the rejected request visible", {
@@ -5917,10 +5903,7 @@ describe("handleSendChat", () => {
       requestHandlers: {
         "skills.proposals.requestRevision": {},
       },
-      hello: {
-        auth: { role: "operator", scopes: ["operator.read"] },
-        features: { methods: ["skills.proposals.requestRevision"] },
-      } as ChatHost["hello"],
+      hello: gatewayHelloForMethods(["skills.proposals.requestRevision"], ["operator.read"]),
     });
 
     await handleSendChat(host, "Revise this proposal", {
@@ -5940,6 +5923,7 @@ describe("handleSendChat", () => {
       requestHandlers: {
         "skills.proposals.requestRevision": () => sent.promise,
       },
+      hello: gatewayHelloForMethods(["skills.proposals.requestRevision"]),
     });
 
     const send = handleSendChat(host, "/reset examples", {
@@ -7071,6 +7055,7 @@ describe("handleSendChat", () => {
         "chat.history": () => idleChatHistory(),
         "skills.proposals.requestRevision": { runId: "revision-retry", status: "started" },
       },
+      hello: gatewayHelloForMethods(["skills.proposals.requestRevision"]),
       chatMessage: "keep my draft",
       pendingSettingsPatches: { "agent:main": settingsPatch.promise },
     });
@@ -9807,12 +9792,7 @@ describe("handleAbortChat", () => {
       requestHandlers: {},
       chatRunId: "run-main",
       chatMessage: "/stop",
-      hello: {
-        type: "hello-ok",
-        protocol: 4,
-        auth: { role: "operator", scopes: ["operator.read"] },
-        features: { methods: ["chat.abort"] },
-      },
+      hello: gatewayHelloForMethods(["chat.abort"], ["operator.read"]),
       sessionKey: "agent:main",
       chatRunError: { summary: "Previous run failed" },
     });
