@@ -1973,7 +1973,7 @@ describe("grouped chat rendering", () => {
     expect(notice?.querySelector("img[onerror]")).toBeNull();
     expect(notice?.dataset.chatRowKey).toBe("notice:command");
     expect(markdownRenderMock).toHaveBeenCalledWith(expect.any(String), {
-      codeBlockChrome: "copy",
+      codeBlockChrome: "none",
     });
   });
 
