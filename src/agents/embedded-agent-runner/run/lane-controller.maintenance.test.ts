@@ -1,5 +1,5 @@
 import { setImmediate as nextTurn } from "node:timers/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import { getAgentEventLifecycleGeneration } from "../../../infra/agent-events.js";
 import { getCommandLaneSnapshot } from "../../../process/command-queue.js";
@@ -125,4 +125,59 @@ describe("foreground cancellation before queue admission", () => {
       }
     },
   );
+
+  it("surfaces a non-abort admission failure even once the lane signal is aborted", async () => {
+    const key = "foreground-maintenance-real-failure";
+    const abort = new AbortController();
+    const failure = new Error("maintenance store unavailable");
+    vi.resetModules();
+    vi.doMock("../../session-maintenance/coordinator.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../../session-maintenance/coordinator.js")>()),
+      // Cancel first, so the lane's catch sees an aborted signal alongside a real failure.
+      beginForegroundSessionMaintenance: async () => {
+        abort.abort(new Error("user stopped"));
+        throw failure;
+      },
+    }));
+    try {
+      const { createEmbeddedRunLaneController: createController } =
+        await import("./lane-controller.js");
+      let generation = getAgentEventLifecycleGeneration();
+      let params: RunEmbeddedAgentParams & { sessionFile: string } = {
+        abortSignal: abort.signal,
+        lifecycleGeneration: generation,
+        prompt: "hello",
+        runId: key,
+        sessionFile: key,
+        sessionId: key,
+        sessionKey: key,
+        timeoutMs: 30_000,
+        trigger: "user",
+        workspaceDir: "/tmp",
+      };
+      const controller = createController({
+        getLifecycleGeneration: () => generation,
+        getParams: () => params,
+        globalLane: `${key}-global`,
+        initialQueuedLifecycleGeneration: generation,
+        sessionLane: key,
+        setLifecycleGeneration: (next) => {
+          generation = next;
+        },
+        setParams: (next) => {
+          params = next;
+        },
+      });
+      let taskRan = false;
+      await expect(
+        controller.enqueueSession(async () => {
+          taskRan = true;
+        }),
+      ).rejects.toBe(failure);
+      expect(taskRan).toBe(false);
+    } finally {
+      vi.doUnmock("../../session-maintenance/coordinator.js");
+      vi.resetModules();
+    }
+  });
 });
