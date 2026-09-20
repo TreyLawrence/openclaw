@@ -77,6 +77,9 @@ export function withMcpRequestHeaders(params: {
       clearTimeout(timer);
     }
     init?.signal?.throwIfAborted();
-    return params.fetchFn(input, getMcpRequestContext() === context ? { ...init, headers } : init);
+    if (getMcpRequestContext() !== context) {
+      throw new Error("MCP request context expired");
+    }
+    return params.fetchFn(input, { ...init, headers });
   };
 }

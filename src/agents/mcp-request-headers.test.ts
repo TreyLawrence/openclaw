@@ -63,6 +63,64 @@ describe("MCP request headers", () => {
     ).rejects.toBe(networkError);
   });
 
+  it("rejects an operation canceled while headers resolve without dispatching", async () => {
+    const resolving = createDeferred();
+    const headers = createDeferred<Record<string, string>>();
+    const operation = createDeferred();
+    const transport = new AbortController();
+    const { fetch, wrapped } = fixture(() => {
+      resolving.resolve();
+      return headers.promise;
+    });
+    let request: Promise<Response> | undefined;
+    const canceled = new Error("Operation canceled");
+    const run = runWithMcpRequestContext({ sessionId: "s", runId: "one" }, () => {
+      request = wrapped("https://mcp.example/mcp", { signal: transport.signal });
+      return operation.promise;
+    });
+    await resolving.promise;
+    const rejectedRun = expect(run).rejects.toBe(canceled);
+    operation.reject(canceled);
+    await rejectedRun;
+
+    const rejectedRequest = expect(request).rejects.toThrow(/^MCP request context expired$/);
+    headers.resolve({ "x-turn": "synthetic-attribution" });
+    await rejectedRequest;
+    expect(transport.signal.aborted).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("dispatches resolved volatile headers while the operation remains active", async () => {
+    const { fetch, wrapped } = fixture(async () => ({ "x-turn": "synthetic-attribution" }));
+    await runWithMcpRequestContext({ sessionId: "s", runId: "one" }, () =>
+      wrapped("https://mcp.example/mcp", { headers: { "x-static": "stable" } }),
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const headers = new Headers(fetch.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("x-turn")).toBe("synthetic-attribution");
+    expect(headers.get("x-static")).toBe("stable");
+  });
+
+  it("preserves transport abort rejection while headers resolve", async () => {
+    const resolving = createDeferred();
+    const headers = createDeferred<Record<string, string>>();
+    const transport = new AbortController();
+    const { fetch, wrapped } = fixture(() => {
+      resolving.resolve();
+      return headers.promise;
+    });
+    const aborted = new Error("Transport aborted");
+    const request = runWithMcpRequestContext({ sessionId: "s", runId: "one" }, () =>
+      wrapped("https://mcp.example/mcp", { signal: transport.signal }),
+    );
+    await resolving.promise;
+    const rejected = expect(request).rejects.toBe(aborted);
+    transport.abort(aborted);
+    headers.resolve({ "x-turn": "synthetic-attribution" });
+    await rejected;
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("bounds stalled providers and hides provider exceptions", async () => {
     vi.useFakeTimers();
     const { fetch, wrapped } = fixture(() => new Promise(() => {}));
