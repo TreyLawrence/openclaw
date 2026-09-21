@@ -418,7 +418,10 @@ export async function loadProviderScopedThinkingCatalog(params: {
 }): Promise<ModelCatalogEntry[]> {
   const request = { ...params, readOnly: true };
   const publishedOwner = getPreparedModelCatalogOwnerSnapshot(request);
-  const owner = (await resolveReadOnlyPublishedModelCatalogOwner(request, "exact"))?.snapshot;
+  // "published" tolerates a runtime-config replacement that lands during this
+  // read-only lookup; "exact" fails the whole turn for a catalog the published
+  // owner still serves correctly. See PreparedModelCatalogConfigReplacedError.
+  const owner = (await resolveReadOnlyPublishedModelCatalogOwner(request, "published"))?.snapshot;
   let snapshot: ModelCatalogSnapshot;
   if (owner?.loadNativeModelCatalog && params.agentRuntime && params.agentRuntime !== "openclaw") {
     snapshot = await owner.loadNativeModelCatalog({

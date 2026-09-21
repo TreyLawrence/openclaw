@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPluginMetadataSnapshot } from "../config/plugin-auto-enable.test-helpers.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { ModelCatalogEntry, ModelCatalogSnapshot } from "./model-catalog.types.js";
-import { PreparedModelCatalogConfigReplacedError } from "./prepared-model-catalog.errors.js";
 import { setPreparedModelFullCatalogAuth } from "./prepared-model-runtime-auth.js";
 import { PreparedModelRuntimeOwnerNotPublishedError } from "./prepared-model-runtime.errors.js";
 import type {
@@ -222,14 +221,14 @@ describe("loadProviderScopedThinkingCatalog", () => {
     expect(scopedLiveMock).not.toHaveBeenCalled();
   });
 
-  it("rejects an owner whose configuration was replaced", async () => {
+  it("serves the published catalog when the configuration was replaced mid-read", async () => {
     const config = { skills: { entries: { marker: { enabled: true } } } };
     const replaced = { skills: { entries: { marker: { enabled: false } } } };
     publishedSnapshotMock.mockReturnValue(owner(replaced, [{ ...entry, reasoning: true }]));
     const { loadProviderScopedThinkingCatalog } = await import("./prepared-model-catalog.js");
     await expect(
       loadProviderScopedThinkingCatalog({ config, provider: entry.provider, model: entry.id }),
-    ).rejects.toBeInstanceOf(PreparedModelCatalogConfigReplacedError);
+    ).resolves.toEqual([{ ...entry, reasoning: true }]);
     expect(scopedStaticMock).not.toHaveBeenCalled();
     expect(scopedLiveMock).not.toHaveBeenCalled();
   });
