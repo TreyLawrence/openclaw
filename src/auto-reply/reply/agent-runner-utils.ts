@@ -23,12 +23,14 @@ import {
   selectApplicableRuntimeConfig,
   type OpenClawConfig,
 } from "../../config/config.js";
+import { resolvePublishedRuntimeConfig } from "../../config/runtime-snapshot.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import {
   isTrustedMessageActionTurnIngress,
   mintMessageActionTurnCapability,
   resolveMessageActionTurnCapabilityLifetime,
 } from "../../gateway/message-action-turn-capability.js";
+import { getActiveSecretsRuntimeConfigSnapshot } from "../../secrets/runtime-state.js";
 import { isReasoningTagProvider } from "../../utils/provider-utils.js";
 import type { TemplateContext } from "../templating.js";
 import { resolveRunAuthProfile } from "./agent-runner-auth-profile.js";
@@ -59,11 +61,13 @@ export function resolveQueuedReplyRuntimeConfig(config: OpenClawConfig): OpenCla
   const runtimeSourceConfig =
     typeof getRuntimeConfigSourceSnapshot === "function" ? getRuntimeConfigSourceSnapshot() : null;
   return (
+    resolvePublishedRuntimeConfig(config) ??
     selectApplicableRuntimeConfig({
       inputConfig: config,
       runtimeConfig,
       runtimeSourceConfig,
-    }) ?? config
+    }) ??
+    config
   );
 }
 
@@ -78,6 +82,11 @@ export async function resolveQueuedReplyExecutionConfig(
   },
 ): Promise<OpenClawConfig> {
   const runtimeConfig = resolveQueuedReplyRuntimeConfig(config);
+  // Gateway activation already resolved these bytes for the model catalog owner.
+  // Command-scoped resolution can materialize other refs and split that generation.
+  if (runtimeConfig === getActiveSecretsRuntimeConfigSnapshot()?.config) {
+    return runtimeConfig;
+  }
   const { resolvedConfig } = await resolveCommandSecretRefsViaGateway({
     config: runtimeConfig,
     commandName: "reply",
