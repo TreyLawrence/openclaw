@@ -421,6 +421,42 @@ describe("PR #154462 real runtime proof", () => {
           reroutedBaseUrl,
         });
         expect(guardedEntry).toBeUndefined();
+
+        // Catalog-sourced route: a generation-A caller whose authored config never named the
+        // provider (its transport came from its earlier catalog row, e.g. plugin discovery)
+        // cannot be constrained by config alone — without the turn's effective route the
+        // rerouted owner's facts are adopted; passing the warmup turn's route (the first
+        // loopback baseUrl, carried on its catalog row) drops them.
+        const warmupBaseUrl = provider.config.baseUrl;
+        const configANoAuthoredRoute = {
+          ...configA,
+          models: { mode: "replace" as const, providers: {} },
+        };
+        const unguardedCatalogRouteRead = await loadProviderScopedThinkingCatalog({
+          config: configANoAuthoredRoute,
+          provider: PROVIDER_ID,
+          model: PRIMARY_MODEL_ID,
+        });
+        const unguardedCatalogRouteEntry = unguardedCatalogRouteRead.find(
+          (entry) => entry.provider === PROVIDER_ID && entry.id === PRIMARY_MODEL_ID,
+        );
+        expect(unguardedCatalogRouteEntry?.baseUrl).toBe(reroutedBaseUrl);
+        const catalogRouteRead = await loadProviderScopedThinkingCatalog({
+          config: configANoAuthoredRoute,
+          provider: PROVIDER_ID,
+          model: PRIMARY_MODEL_ID,
+          effectiveRoute: { api: "anthropic-messages", baseUrl: warmupBaseUrl },
+        });
+        const catalogRouteEntry = catalogRouteRead.find(
+          (entry) => entry.provider === PROVIDER_ID && entry.id === PRIMARY_MODEL_ID,
+        );
+        proof("catalog_sourced_route_guarded", {
+          effectiveBaseUrl: warmupBaseUrl,
+          reroutedBaseUrl,
+          unguardedEntryBaseUrl: unguardedCatalogRouteEntry?.baseUrl,
+          guardedEntryPresent: catalogRouteEntry !== undefined,
+        });
+        expect(catalogRouteEntry).toBeUndefined();
       } finally {
         if (gateway) {
           await disconnectGatewayClient(gateway.client).catch(() => undefined);

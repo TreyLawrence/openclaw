@@ -290,6 +290,35 @@ describe("loadProviderScopedThinkingCatalog", () => {
     expect(scopedLiveMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      name: "omits facts served off the turn's route",
+      publishedBaseUrl: "https://route-b.invalid/v1",
+    },
+    { name: "keeps facts on the turn's route", publishedBaseUrl: entry.baseUrl },
+  ])(
+    "$name when the caller's route came from its catalog, not authored config",
+    async ({ publishedBaseUrl }) => {
+      // Config A authors no provider route: the turn's transport was supplied by its
+      // earlier catalog row, so only the caller-passed effectiveRoute can constrain it.
+      const config = { skills: { entries: { marker: { enabled: true } } } };
+      const replaced = { skills: { entries: { marker: { enabled: false } } } };
+      const publishedEntry = { ...entry, baseUrl: publishedBaseUrl as string, reasoning: true };
+      publishedSnapshotMock.mockReturnValue(owner(replaced, [publishedEntry]));
+      const { loadProviderScopedThinkingCatalog } = await import("./prepared-model-catalog.js");
+      await expect(
+        loadProviderScopedThinkingCatalog({
+          config,
+          provider: entry.provider,
+          model: entry.id,
+          effectiveRoute: { api: entry.api, baseUrl: entry.baseUrl },
+        }),
+      ).resolves.toEqual(publishedBaseUrl === entry.baseUrl ? [publishedEntry] : []);
+      expect(scopedStaticMock).not.toHaveBeenCalled();
+      expect(scopedLiveMock).not.toHaveBeenCalled();
+    },
+  );
+
   it("keeps native harness observations available without a published owner", async () => {
     const nativeEntry = { ...entry, nativeRuntime: "test-harness", reasoning: true };
     augmentCatalogMock.mockResolvedValue({ entries: [nativeEntry], routeVariants: [nativeEntry] });

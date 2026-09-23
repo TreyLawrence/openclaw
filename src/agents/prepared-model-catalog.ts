@@ -419,6 +419,13 @@ export async function loadProviderScopedThinkingCatalog(params: {
   workspaceDir?: string;
   /** Input preparation must resolve modalities for this route, independently of reasoning. */
   requiredInputRoute?: Pick<ModelCatalogEntry, "api" | "baseUrl">;
+  /**
+   * Transport route the admitted turn is actually using, sourced from its prepared or
+   * carried catalog row. Authored config cannot reconstruct this route when the provider
+   * has no configured api/baseUrl, so replaced-config recovery trusts it over config.
+   * Structurally typed: carried rows (ThinkingCatalogEntry) serialize api as plain string.
+   */
+  effectiveRoute?: { api?: string; baseUrl?: string };
 }): Promise<ModelCatalogEntry[]> {
   const request = { ...params, readOnly: true };
   // "published" tolerates a runtime-config replacement that lands during this
@@ -482,13 +489,15 @@ export async function loadProviderScopedThinkingCatalog(params: {
     // entry retains caller-configured facts: authored model rows early-return
     // upstream of this function (applyModelDefaults fills their reasoning/input),
     // and hydration callers keep their existing catalog when no row resolves here.
+    // The caller's carried catalog row names the turn's actual transport; authored config
+    // is only a fallback for direct or ambient readers that hold no such row.
     const providerConfig = resolveMergedModelProviderConfig(params.config, params.provider);
     const configuredModel = findConfiguredProviderModel(
       providerConfig,
       params.provider,
       params.model,
     );
-    const callerRoute = {
+    const callerRoute = params.effectiveRoute ?? {
       api: configuredModel?.api ?? providerConfig?.api,
       baseUrl: configuredModel?.baseUrl ?? providerConfig?.baseUrl,
     };
