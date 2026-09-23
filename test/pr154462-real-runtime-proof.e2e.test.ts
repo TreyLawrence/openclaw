@@ -159,6 +159,7 @@ describe("PR #154462 real runtime proof", () => {
       });
       let holdNextPrimaryCall = false;
       let failPrimaryCalls = false;
+      let dummyServer: ReturnType<typeof createServer> | undefined;
 
       try {
         tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-pr154462-proof-"));
@@ -252,6 +253,9 @@ describe("PR #154462 real runtime proof", () => {
           token: TOKEN,
           clientDisplayName: "pr154462-proof",
           scopes: ["operator.admin", "operator.read", "operator.write"],
+          // Models hot reloads are classified irreversible and refuse to apply without
+          // a restart recovery owner; a real Gateway always runs with one (gateway-cli).
+          hotReloadRecovery: () => ({ status: "emitted" as const }),
         });
         const client = gateway.client;
         proof("gateway_ready", { port: gateway.port });
@@ -374,10 +378,58 @@ describe("PR #154462 real runtime proof", () => {
         });
         expect(staleEntry).toMatchObject({ reasoning: true, input: ["text", "image"] });
         proof("scenario_pass", { sessionKey });
+
+        // Model-affecting replacement: a second real config.patch moves the provider to a
+        // different loopback route (a bound listener that never receives traffic). The same
+        // stale generation-A read must NOT adopt the rerouted owner's capability facts.
+        dummyServer = createServer(() => {});
+        await new Promise<void>((resolve, reject) => {
+          dummyServer?.once("error", reject);
+          dummyServer?.listen(0, "127.0.0.1", resolve);
+        });
+        const dummyAddress = dummyServer.address();
+        if (!dummyAddress || typeof dummyAddress === "string") {
+          throw new Error("dummy reroute listener did not bind a loopback port");
+        }
+        const reroutedBaseUrl = `http://127.0.0.1:${dummyAddress.port}`;
+        const beforeReroute = await rpc<{ hash: string }>("config.get", {});
+        const rerouted = await rpc<{ hash?: string }>("config.patch", {
+          baseHash: beforeReroute.hash,
+          raw: JSON.stringify({
+            models: {
+              providers: {
+                [provider.providerId]: { ...provider.config, baseUrl: reroutedBaseUrl },
+              },
+            },
+          }),
+        });
+        expect(rerouted.hash).toEqual(expect.any(String));
+        expect(getRuntimeConfig()).not.toBe(configB);
+        proof("model_affecting_config_published", { reroutedBaseUrl });
+        const guardedRead = await loadProviderScopedThinkingCatalog({
+          config: configA,
+          provider: PROVIDER_ID,
+          model: PRIMARY_MODEL_ID,
+        });
+        const guardedEntry = guardedRead.find(
+          (entry) => entry.provider === PROVIDER_ID && entry.id === PRIMARY_MODEL_ID,
+        );
+        proof("model_affecting_replacement_guarded", {
+          entries: guardedRead.length,
+          entryPresent: guardedEntry !== undefined,
+          entryBaseUrl: guardedEntry?.baseUrl,
+          reroutedBaseUrl,
+        });
+        expect(guardedEntry).toBeUndefined();
       } finally {
         if (gateway) {
           await disconnectGatewayClient(gateway.client).catch(() => undefined);
           await gateway.server.close().catch(() => undefined);
+        }
+        if (dummyServer?.listening) {
+          await new Promise<void>((resolve) => {
+            dummyServer?.close(() => resolve());
+          });
         }
         if (providerServer?.listening) {
           heldPrimaryResponse?.destroy();

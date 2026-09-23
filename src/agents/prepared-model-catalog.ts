@@ -1,5 +1,9 @@
 /** Lifecycle-owned model catalog access. */
 import { getRuntimeConfig } from "../config/config.js";
+import {
+  findConfiguredProviderModel,
+  resolveMergedModelProviderConfig,
+} from "../config/model-provider-config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   listAgentIds,
@@ -421,6 +425,9 @@ export async function loadProviderScopedThinkingCatalog(params: {
   // read-only lookup; "exact" fails the whole turn for a catalog the published
   // owner still serves correctly. See PreparedModelCatalogConfigReplacedError.
   const owner = (await resolveReadOnlyPublishedModelCatalogOwner(request, "published"))?.snapshot;
+  // A replaced-config owner's facts are only safe on the caller's transport route.
+  const ownerConfigReplaced =
+    owner !== undefined && !preparedModelRuntimeConfigsMatch(owner.config, params.config);
   let snapshot: ModelCatalogSnapshot;
   if (owner?.loadNativeModelCatalog && params.agentRuntime && params.agentRuntime !== "openclaw") {
     snapshot = await owner.loadNativeModelCatalog({
@@ -466,6 +473,30 @@ export async function loadProviderScopedThinkingCatalog(params: {
     }
   }
   entries = normalizeThinkingCatalogProviders(entries);
+  if (ownerConfigReplaced) {
+    // Keep thinking facts on the active turn's model route: a hot reload may have
+    // changed the provider's api or baseUrl, and applying the replaced owner's row
+    // to the caller's route could suppress supported thinking or send unsupported
+    // parameters. An unconfigured caller route stays unconstrained, because
+    // modelTransportRoutesMatch falls back to the entry's own fields. Dropping the
+    // entry retains caller-configured facts: authored model rows early-return
+    // upstream of this function (applyModelDefaults fills their reasoning/input),
+    // and hydration callers keep their existing catalog when no row resolves here.
+    const providerConfig = resolveMergedModelProviderConfig(params.config, params.provider);
+    const configuredModel = findConfiguredProviderModel(
+      providerConfig,
+      params.provider,
+      params.model,
+    );
+    const callerRoute = {
+      api: configuredModel?.api ?? providerConfig?.api,
+      baseUrl: configuredModel?.baseUrl ?? providerConfig?.baseUrl,
+    };
+    const recovered = findModelInCatalog(entries, params.provider, params.model);
+    if (recovered && !modelTransportRoutesMatch(recovered, callerRoute)) {
+      entries = entries.filter((candidate) => candidate !== recovered);
+    }
+  }
   if (params.requiredInputRoute !== undefined) {
     const entry = findModelInCatalog(entries, params.provider, params.model);
     if (

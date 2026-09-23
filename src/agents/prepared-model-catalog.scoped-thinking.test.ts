@@ -272,6 +272,24 @@ describe("loadProviderScopedThinkingCatalog", () => {
     expect(acquireSnapshotMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { name: "omits facts served for another route", routeBaseUrl: "https://route-a.invalid/v1" },
+    { name: "keeps facts on the caller's route", routeBaseUrl: entry.baseUrl },
+  ])("$name when the replaced config constrains the model route", async ({ routeBaseUrl }) => {
+    const config = {
+      skills: { entries: { marker: { enabled: true } } },
+      models: { providers: { acme: { baseUrl: routeBaseUrl as string, models: [] } } },
+    };
+    const replaced = { skills: { entries: { marker: { enabled: false } } } };
+    publishedSnapshotMock.mockReturnValue(owner(replaced, [{ ...entry, reasoning: true }]));
+    const { loadProviderScopedThinkingCatalog } = await import("./prepared-model-catalog.js");
+    await expect(
+      loadProviderScopedThinkingCatalog({ config, provider: entry.provider, model: entry.id }),
+    ).resolves.toEqual(routeBaseUrl === entry.baseUrl ? [{ ...entry, reasoning: true }] : []);
+    expect(scopedStaticMock).not.toHaveBeenCalled();
+    expect(scopedLiveMock).not.toHaveBeenCalled();
+  });
+
   it("keeps native harness observations available without a published owner", async () => {
     const nativeEntry = { ...entry, nativeRuntime: "test-harness", reasoning: true };
     augmentCatalogMock.mockResolvedValue({ entries: [nativeEntry], routeVariants: [nativeEntry] });
