@@ -1,5 +1,4 @@
 // Produces redacted runtime config snapshots for diagnostics and UI surfaces.
-import { isDeepStrictEqual } from "node:util";
 import { sha256Base64Url } from "../infra/crypto-digest.js";
 import { clearExecutablePathCache } from "../infra/executable-path.js";
 import { sessionChanges } from "../sessions/session-row-changes.js";
@@ -23,7 +22,10 @@ import {
   type CapturedRuntimeConfigRead,
   getRuntimeConfigCapture,
 } from "./runtime-config-capture-state.js";
+import { configSnapshotsMatch, stableConfigStringify } from "./runtime-config-identity.js";
 import type { OpenClawConfig } from "./types.js";
+
+export { selectApplicableRuntimeConfig } from "./runtime-config-identity.js";
 
 export type RuntimeConfigSnapshotRefreshOptions = {
   includeAuthStoreRefs?: boolean;
@@ -176,39 +178,6 @@ const runtimeConfigSnapshotPreparers = new Map<
     }
   | undefined
 >();
-
-function stableConfigStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value) ?? "null";
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((entry) => stableConfigStringify(entry)).join(",")}]`;
-  }
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).toSorted();
-  return `{${keys
-    .map((key) => `${JSON.stringify(key)}:${stableConfigStringify(record[key])}`)
-    .join(",")}}`;
-}
-
-function configSnapshotsMatch(left: OpenClawConfig, right: OpenClawConfig): boolean {
-  if (left === right) {
-    return true;
-  }
-  // Fresh reads allocate new facts. Compare their complete provenance, not object identity
-  // or just JSON config bytes: same-byte values can name different authored SecretRefs.
-  if (
-    getConfigResolutionFacts(left) !== getConfigResolutionFacts(right) &&
-    !isDeepStrictEqual(serializeConfigResolutionFacts(left), serializeConfigResolutionFacts(right))
-  ) {
-    return false;
-  }
-  try {
-    return stableConfigStringify(left) === stableConfigStringify(right);
-  } catch {
-    return false;
-  }
-}
 
 // Diagnostic callers stop at their raw revision; this owner accepts config objects.
 // Only immutable identities share hashes across reads.
@@ -453,31 +422,6 @@ export function createRuntimeConfigWriteNotification(params: {
       ? { preparedCandidatesByOwner: params.preparedCandidatesByOwner }
       : {}),
   };
-}
-
-export function selectApplicableRuntimeConfig(params: {
-  inputConfig?: OpenClawConfig;
-  runtimeConfig?: OpenClawConfig | null;
-  runtimeSourceConfig?: OpenClawConfig | null;
-}): OpenClawConfig | undefined {
-  const runtimeConfig = params.runtimeConfig ?? null;
-  if (!runtimeConfig) {
-    return params.inputConfig;
-  }
-  const inputConfig = params.inputConfig;
-  if (!inputConfig) {
-    return runtimeConfig;
-  }
-  if (inputConfig === runtimeConfig) {
-    return inputConfig;
-  }
-  const runtimeSourceConfig = params.runtimeSourceConfig ?? null;
-  // A pinned file config is not an activated secrets snapshot. Without its source
-  // contract, replacing an explicit config can discard command-resolved credentials.
-  if (runtimeSourceConfig && configSnapshotsMatch(inputConfig, runtimeSourceConfig)) {
-    return runtimeConfig;
-  }
-  return inputConfig;
 }
 
 /** Bind a retained consumer to its current runtime owner while preserving scoped configs. */

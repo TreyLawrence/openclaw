@@ -1,6 +1,9 @@
 // Tests queued reply runtime secret resolution for agent and channel scopes.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getRuntimeAuthProfileStoreCredentialsRevision } from "../../agents/auth-profiles/runtime-snapshots.js";
+import {
+  getRuntimeAuthProfileStoreCredentialsRevision,
+  getRuntimeAuthProfileStoreSnapshotsRevision,
+} from "../../agents/auth-profiles/runtime-snapshots.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
   activateSecretsRuntimeSnapshotState,
@@ -211,6 +214,7 @@ describe("resolveQueuedReplyExecutionConfig channel scope", () => {
         config,
         authStores: [],
         authStoreCredentialsRevision: getRuntimeAuthProfileStoreCredentialsRevision(),
+        authStoreSnapshotsRevision: getRuntimeAuthProfileStoreSnapshotsRevision(),
         warnings: [],
         webTools: {
           search: { providerSource: "none", diagnostics: [] },

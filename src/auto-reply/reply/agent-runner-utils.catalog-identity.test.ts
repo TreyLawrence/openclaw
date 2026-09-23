@@ -7,7 +7,9 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PreparedModelCatalogConfigReplacedError } from "../../agents/prepared-model-catalog.errors.js";
 import { loadPreparedModelCatalogSnapshot } from "../../agents/prepared-model-catalog.js";
+import { withPreparedModelRuntimePluginGenerationScope } from "../../agents/prepared-model-runtime-generation-scope.js";
 import { refreshPreparedModelRuntimeSnapshots } from "../../agents/prepared-model-runtime.js";
+import type { PreparedModelRuntimePluginGeneration } from "../../agents/prepared-model-runtime.types.js";
 import {
   clearRuntimeConfigSnapshot,
   getRuntimeConfigSnapshot,
@@ -19,7 +21,10 @@ import {
   createOpenClawTestState,
   type OpenClawTestState,
 } from "../../test-utils/openclaw-test-state.js";
-import { resolveQueuedReplyExecutionConfig } from "./agent-runner-utils.js";
+import {
+  resolveQueuedReplyExecutionConfig,
+  resolveQueuedReplyRuntimeConfig,
+} from "./agent-runner-utils.js";
 
 vi.mock("../../secrets/runtime-state.js", () => ({
   getActiveSecretsRuntimeConfigSnapshot: () => ({
@@ -83,6 +88,32 @@ describe("queued reply catalog identity", () => {
         loadPreparedModelCatalogSnapshot({ ...catalogParams, config: resolved }),
       ).resolves.toBe(catalog);
     }
+  });
+
+  it("keeps an admitted turn's retained config when a newer generation publishes", async () => {
+    const queuedConfig = await publish({
+      skills: { entries: { example: { apiKey: "first-key" } } },
+    });
+    const next = await publish(
+      {
+        skills: { entries: { example: { apiKey: "rotated-key" } } },
+        tools: { updatePlan: true },
+      },
+      { ...source, tools: { updatePlan: true } },
+    );
+    // Outside any admitted generation scope (a queue drain), the rebind adopts the
+    // replacement; inside one (an already-admitted immediate reply), the retained
+    // config stays paired with its generation lease.
+    expect(resolveQueuedReplyRuntimeConfig(queuedConfig)).toBe(next);
+    const admittedGeneration = {
+      pluginMetadataSnapshot: {},
+      inlineProviderModels: [],
+      configuredCatalogEntries: [],
+    } as unknown as PreparedModelRuntimePluginGeneration;
+    const resolved = withPreparedModelRuntimePluginGenerationScope(admittedGeneration, () =>
+      resolveQueuedReplyRuntimeConfig(queuedConfig),
+    );
+    expect(resolved).toBe(queuedConfig);
   });
 
   it("adopts a re-prepared config and secret generation without accepting genuine divergence", async () => {

@@ -4,6 +4,7 @@ import {
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import { resolveFastModeState } from "../../agents/fast-mode.js";
+import { getPreparedModelRuntimePluginGeneration } from "../../agents/prepared-model-runtime-generation-scope.js";
 import { resolveCandidateThinkingLevel } from "../../agents/thinking-runtime.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
 import { getChannelPlugin } from "../../channels/plugins/index.js";
@@ -60,8 +61,12 @@ export function resolveQueuedReplyRuntimeConfig(config: OpenClawConfig): OpenCla
     typeof getRuntimeConfigSnapshot === "function" ? getRuntimeConfigSnapshot() : null;
   const runtimeSourceConfig =
     typeof getRuntimeConfigSourceSnapshot === "function" ? getRuntimeConfigSourceSnapshot() : null;
+  // An already-admitted turn keeps its retained config paired with its plugin
+  // generation lease; rebinding to a newer publication would split them and fail
+  // the nested borrow. Queue drains run outside the generation scope and rebind.
+  const admittedGeneration = getPreparedModelRuntimePluginGeneration();
   return (
-    resolvePublishedRuntimeConfig(config) ??
+    (admittedGeneration ? null : resolvePublishedRuntimeConfig(config)) ??
     selectApplicableRuntimeConfig({
       inputConfig: config,
       runtimeConfig,
