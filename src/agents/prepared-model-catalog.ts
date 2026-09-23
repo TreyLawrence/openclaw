@@ -417,7 +417,6 @@ export async function loadProviderScopedThinkingCatalog(params: {
   requiredInputRoute?: Pick<ModelCatalogEntry, "api" | "baseUrl">;
 }): Promise<ModelCatalogEntry[]> {
   const request = { ...params, readOnly: true };
-  const publishedOwner = getPreparedModelCatalogOwnerSnapshot(request);
   // "published" tolerates a runtime-config replacement that lands during this
   // read-only lookup; "exact" fails the whole turn for a catalog the published
   // owner still serves correctly. See PreparedModelCatalogConfigReplacedError.
@@ -430,9 +429,11 @@ export async function loadProviderScopedThinkingCatalog(params: {
       runtime: params.agentRuntime,
     });
   } else {
+    // The resolved owner is always a published lifecycle owner, so completed
+    // inventory facts stay attached even when the accepted config generation
+    // differs from the caller's.
     const catalog = owner
-      ? (publishedOwner ? await materializeRequestedModelCatalog(owner, true, undefined) : owner)
-          .modelCatalog
+      ? (await materializeRequestedModelCatalog(owner, true, undefined)).modelCatalog
       : { entries: [], routeVariants: [] };
     const agentId = params.agentId ?? resolveAmbientOwnerAgentId(params.config);
     const { augmentModelCatalogWithAgentHarness } = await import("./harness/model-catalog.js");

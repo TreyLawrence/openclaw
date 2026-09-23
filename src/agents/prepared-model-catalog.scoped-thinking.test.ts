@@ -233,6 +233,45 @@ describe("loadProviderScopedThinkingCatalog", () => {
     expect(scopedLiveMock).not.toHaveBeenCalled();
   });
 
+  it("retains completed capability facts when the accepted config was replaced", async () => {
+    const config = { skills: { entries: { marker: { enabled: true } } } };
+    const replaced = { skills: { entries: { marker: { enabled: false } } } };
+    const completedEntry: ModelCatalogEntry = {
+      ...entry,
+      reasoning: true,
+      input: ["text", "image"],
+    };
+    const completed: ModelCatalogSnapshot = {
+      entries: [completedEntry],
+      routeVariants: [completedEntry],
+    };
+    setPreparedModelFullCatalogAuth(completed, {
+      providerAuthLabels: new Map(),
+      authStore: { version: 1, profiles: {} },
+      authModes: {},
+    });
+    const loadFullModelCatalog = vi.fn(async () => completed);
+    // Static rows omit reasoning and image facts; only completed inventory has them.
+    publishedSnapshotMock.mockReturnValue({
+      ...owner(replaced, [entry]),
+      readFullModelCatalog: () => completed,
+      loadFullModelCatalog,
+    });
+    const { loadProviderScopedThinkingCatalog } = await import("./prepared-model-catalog.js");
+    await expect(
+      loadProviderScopedThinkingCatalog({
+        config,
+        provider: entry.provider,
+        model: entry.id,
+        requiredInputRoute: { api: entry.api, baseUrl: entry.baseUrl },
+      }),
+    ).resolves.toEqual([completedEntry]);
+    expect(loadFullModelCatalog).not.toHaveBeenCalled();
+    expect(scopedStaticMock).not.toHaveBeenCalled();
+    expect(scopedLiveMock).not.toHaveBeenCalled();
+    expect(acquireSnapshotMock).not.toHaveBeenCalled();
+  });
+
   it("keeps native harness observations available without a published owner", async () => {
     const nativeEntry = { ...entry, nativeRuntime: "test-harness", reasoning: true };
     augmentCatalogMock.mockResolvedValue({ entries: [nativeEntry], routeVariants: [nativeEntry] });
