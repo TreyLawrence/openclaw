@@ -319,6 +319,30 @@ describe("loadProviderScopedThinkingCatalog", () => {
     },
   );
 
+  it("fills missing carried-route fields from the captured config", async () => {
+    // A partial carried row must not widen the match to a wildcard: the authored
+    // baseUrl still constrains the recovered facts when the row omits it.
+    const config = {
+      models: {
+        providers: { [entry.provider]: { baseUrl: "https://route-a.invalid/v1", models: [] } },
+      },
+    } as OpenClawConfig;
+    const replaced = { skills: { entries: { marker: { enabled: false } } } };
+    const publishedEntry = { ...entry, baseUrl: "https://route-b.invalid/v1", reasoning: true };
+    publishedSnapshotMock.mockReturnValue(owner(replaced, [publishedEntry]));
+    const { loadProviderScopedThinkingCatalog } = await import("./prepared-model-catalog.js");
+    await expect(
+      loadProviderScopedThinkingCatalog({
+        config,
+        provider: entry.provider,
+        model: entry.id,
+        effectiveRoute: { api: entry.api },
+      }),
+    ).resolves.toEqual([]);
+    expect(scopedStaticMock).not.toHaveBeenCalled();
+    expect(scopedLiveMock).not.toHaveBeenCalled();
+  });
+
   it("keeps native harness observations available without a published owner", async () => {
     const nativeEntry = { ...entry, nativeRuntime: "test-harness", reasoning: true };
     augmentCatalogMock.mockResolvedValue({ entries: [nativeEntry], routeVariants: [nativeEntry] });

@@ -15,7 +15,6 @@
  */
 import fs from "node:fs/promises";
 import { createServer, type ServerResponse } from "node:http";
-import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
@@ -35,6 +34,7 @@ import {
   startGatewayWithClient,
 } from "../src/gateway/test-helpers.e2e.js";
 import { captureEnv, setTestEnvValue } from "../src/test-utils/env.js";
+import { useAutoCleanupTempDirTracker } from "./helpers/temp-dir.js";
 
 const envKeys = [
   "HOME",
@@ -134,14 +134,7 @@ function buildMockAnthropicProvider(baseUrl: string) {
 }
 
 describe("PR #154462 real runtime proof", () => {
-  let tempHome: string | undefined;
-
-  afterEach(async () => {
-    if (tempHome) {
-      await fs.rm(tempHome, { recursive: true, force: true });
-      tempHome = undefined;
-    }
-  });
+  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
   it(
     "keeps a turn alive across a runtime-config replacement published mid-run",
@@ -162,7 +155,7 @@ describe("PR #154462 real runtime proof", () => {
       let dummyServer: ReturnType<typeof createServer> | undefined;
 
       try {
-        tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-pr154462-proof-"));
+        const tempHome = tempDirs.make("openclaw-pr154462-proof-");
         const stateDir = path.join(tempHome, ".openclaw");
         const workspaceDir = path.join(tempHome, "workspace");
         const configPath = path.join(stateDir, "openclaw.json");

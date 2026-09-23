@@ -490,16 +490,18 @@ export async function loadProviderScopedThinkingCatalog(params: {
     // upstream of this function (applyModelDefaults fills their reasoning/input),
     // and hydration callers keep their existing catalog when no row resolves here.
     // The caller's carried catalog row names the turn's actual transport; authored config
-    // is only a fallback for direct or ambient readers that hold no such row.
+    // fills each field the row omits, so a partial row never widens the match to a
+    // wildcard that would discard the captured config's route.
     const providerConfig = resolveMergedModelProviderConfig(params.config, params.provider);
     const configuredModel = findConfiguredProviderModel(
       providerConfig,
       params.provider,
       params.model,
     );
-    const callerRoute = params.effectiveRoute ?? {
-      api: configuredModel?.api ?? providerConfig?.api,
-      baseUrl: configuredModel?.baseUrl ?? providerConfig?.baseUrl,
+    const callerRoute = {
+      api: params.effectiveRoute?.api ?? configuredModel?.api ?? providerConfig?.api,
+      baseUrl:
+        params.effectiveRoute?.baseUrl ?? configuredModel?.baseUrl ?? providerConfig?.baseUrl,
     };
     const recovered = findModelInCatalog(entries, params.provider, params.model);
     if (recovered && !modelTransportRoutesMatch(recovered, callerRoute)) {
