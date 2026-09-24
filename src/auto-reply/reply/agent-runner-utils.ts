@@ -88,17 +88,20 @@ export async function resolveQueuedReplyExecutionConfig(
 ): Promise<OpenClawConfig> {
   const runtimeConfig = resolveQueuedReplyRuntimeConfig(config);
   // Gateway activation already resolved these bytes for the model catalog owner.
-  // Command-scoped resolution can materialize other refs and split that generation.
-  if (runtimeConfig === getActiveSecretsRuntimeConfigSnapshot()?.config) {
-    return runtimeConfig;
+  // Command-scoped resolution can materialize other refs and split that generation,
+  // so the activated snapshot skips only that stage — the channel/account-scoped
+  // resolution below still runs, keeping cold-account rejection intact. Healthy
+  // accounts leave no scoped targets in activated bytes, so identity is preserved.
+  let baseResolvedConfig = runtimeConfig;
+  if (runtimeConfig !== getActiveSecretsRuntimeConfigSnapshot()?.config) {
+    const { resolvedConfig } = await resolveCommandSecretRefsViaGateway({
+      config: runtimeConfig,
+      commandName: "reply",
+      targetIds: getAgentRuntimeCommandSecretTargetIds({ config: runtimeConfig }),
+      optionalActivePaths: getAgentRuntimeOptionalCommandSecretPaths(runtimeConfig),
+    });
+    baseResolvedConfig = resolvedConfig ?? runtimeConfig;
   }
-  const { resolvedConfig } = await resolveCommandSecretRefsViaGateway({
-    config: runtimeConfig,
-    commandName: "reply",
-    targetIds: getAgentRuntimeCommandSecretTargetIds({ config: runtimeConfig }),
-    optionalActivePaths: getAgentRuntimeOptionalCommandSecretPaths(runtimeConfig),
-  });
-  const baseResolvedConfig = resolvedConfig ?? runtimeConfig;
 
   const scope = resolveMessageSecretScope({
     channel: params?.originatingChannel,

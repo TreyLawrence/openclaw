@@ -243,6 +243,8 @@ describe("resolveQueuedReplyExecutionConfig channel scope", () => {
       resolvedConfig: { skills: { entries: { example: { apiKey: "command-key" } } } },
     });
 
+    // Healthy activated bytes leave no scoped channel targets to resolve.
+    hoisted.getScopedChannelsCommandSecretTargetsMock.mockReturnValue({ targetIds: new Set() });
     for (const config of [sourceConfig, runtimeConfig, structuredClone(sourceConfig)]) {
       const resolved = await resolveQueuedReplyExecutionConfig(config, {
         originatingChannel: "discord",
@@ -251,6 +253,36 @@ describe("resolveQueuedReplyExecutionConfig channel scope", () => {
       expect(JSON.stringify(resolved)).toBe(JSON.stringify(runtimeConfig));
     }
     expect(hoisted.resolveCommandSecretRefsViaGatewayMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps cold channel-account resolution on the activated fast path", async () => {
+    const sourceConfig: OpenClawConfig = {
+      skills: {
+        entries: {
+          example: { apiKey: { source: "env", provider: "default", id: "EXAMPLE_API_KEY" } },
+        },
+      },
+    };
+    const runtimeConfig = activateRuntime(sourceConfig, {
+      skills: { entries: { example: { apiKey: "activated-key" } } },
+    });
+    // A cold account still carries an unresolved scoped target; the activated
+    // snapshot must not bypass the channel/account-scoped stage that rejects it.
+    const scopedResolved = {
+      ...runtimeConfig,
+      channels: { discord: { accounts: { work: { token: "scoped-token" } } } },
+    };
+    hoisted.resolveCommandSecretRefsViaGatewayMock.mockResolvedValue({
+      resolvedConfig: scopedResolved,
+    });
+    const resolved = await resolveQueuedReplyExecutionConfig(runtimeConfig, {
+      originatingChannel: "discord",
+      originatingAccountId: "work",
+    });
+    expect(resolved).toBe(scopedResolved);
+    expect(hoisted.resolveCommandSecretRefsViaGatewayMock).toHaveBeenCalledTimes(1);
+    expect(resolveCommandSecretRefsCall(0).config).toBe(runtimeConfig);
+    expect(resolveCommandSecretRefsCall(0).targetIds).toEqual(new Set(["channels.discord.token"]));
   });
 
   it("adopts a new runtime generation for a previously queued config while preserving explicit overrides", async () => {
