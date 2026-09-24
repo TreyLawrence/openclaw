@@ -222,7 +222,15 @@ describe("resolveQueuedReplyExecutionConfig channel scope", () => {
           diagnostics: [],
         },
       },
-      refreshContext: null,
+      // The gateway activation this models prepares config SecretRefs; an
+      // unrecorded activation must not reach the fast path.
+      refreshContext: {
+        env: {},
+        explicitAgentDirs: null,
+        includeConfigRefs: true,
+        includeAuthStoreRefs: false,
+        loadablePluginOrigins: new Map(),
+      },
       refreshHandler: null,
     });
     return resolveQueuedReplyRuntimeConfig(sourceConfig);

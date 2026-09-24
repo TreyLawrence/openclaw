@@ -92,8 +92,12 @@ export async function resolveQueuedReplyExecutionConfig(
   // so the activated snapshot skips only that stage — the channel/account-scoped
   // resolution below still runs, keeping cold-account rejection intact. Healthy
   // accounts leave no scoped targets in activated bytes, so identity is preserved.
+  // Auth-only and unrecorded snapshots carry config bytes without config-ref
+  // preparation authority; only a snapshot that classified its SecretRef owners
+  // may skip strict command resolution.
+  const activeSnapshot = getActiveSecretsRuntimeConfigSnapshot();
   let baseResolvedConfig = runtimeConfig;
-  if (runtimeConfig !== getActiveSecretsRuntimeConfigSnapshot()?.config) {
+  if (!(activeSnapshot?.configRefsPrepared === true && runtimeConfig === activeSnapshot.config)) {
     const { resolvedConfig } = await resolveCommandSecretRefsViaGateway({
       config: runtimeConfig,
       commandName: "reply",

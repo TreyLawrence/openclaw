@@ -30,6 +30,7 @@ vi.mock("../../secrets/runtime-state.js", () => ({
   getActiveSecretsRuntimeConfigSnapshot: () => ({
     config: getRuntimeConfigSnapshot(),
     sourceConfig: getRuntimeConfigSourceSnapshot(),
+    configRefsPrepared: true,
   }),
 }));
 vi.mock("../../cli/command-secret-gateway.js", () => ({
