@@ -11,6 +11,10 @@ import { isPathInside } from "../infra/path-guards.js";
 import { setSqliteBusyTimeout } from "../infra/sqlite-busy-timeout.js";
 import { SQLITE_IDLE_HANDLE_TTL_MS } from "../infra/sqlite-handle-lifecycle.js";
 import type { SqliteIntegrityDiagnostics } from "../infra/sqlite-integrity.js";
+import {
+  deferSqlitePostCommitPublication,
+  hasSqlitePostCommitScope,
+} from "../infra/sqlite-post-commit.js";
 import { createSqliteTerminalOpenLatch } from "../infra/sqlite-terminal-open-latch.js";
 import {
   registerSqliteCacheExitClose,
@@ -22,6 +26,7 @@ import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { releaseAgentDeletionDatabaseCleanup } from "./agent-deletion-cleanup.js";
 import type {
   OpenClawAgentDatabase,
+  OpenClawAgentDatabaseOptions,
   OpenClawAgentDatabaseOwnerInspection,
 } from "./openclaw-agent-db-contract.js";
 import {
@@ -81,6 +86,10 @@ export type PendingAgentDatabaseOpen = {
   promise: Promise<OpenClawAgentDatabase>;
   assertHeld?: () => void;
   operations: number;
+  /** Shared physical preparation; caller cancellation never owns another waiter. */
+  lifecyclePrepared?: Promise<void>;
+  /** Latest admitted waiter deadline; each waiter still owns its own shorter timer. */
+  lifecycleDeadlineMs?: number;
   releaseBorrow?: () => void;
   validation?: OpenClawAgentDatabaseValidation;
 };
@@ -104,6 +113,30 @@ const cache = resolveGlobalSingleton<AgentDatabaseLifecycle>(
     retainedCloses: new Set(),
   }),
 );
+
+/** Queue a non-throwing runtime publication on the outer database commit edge. */
+export function deferOpenClawAgentPostCommitPublication(
+  database: OpenClawAgentDatabase,
+  publish: (options: OpenClawAgentDatabaseOptions) => void,
+): boolean {
+  // Maintenance can mark projections dirty without scheduling runtime publication.
+  if (!hasSqlitePostCommitScope(database.db)) {
+    return false;
+  }
+  const lease = cache.leases.get(database.path);
+  if (
+    cache.databases.get(database.path) !== database ||
+    (!lease && !cache.incognito.has(database))
+  ) {
+    throw new Error("Agent post-commit publication requires its admitted database owner");
+  }
+  const options = {
+    agentId: database.agentId,
+    path: database.path,
+    ...(lease ? { env: { ...lease.env } } : {}),
+  };
+  return deferSqlitePostCommitPublication(database.db, () => publish(options));
+}
 
 /** Runtime reads and opens share the generation-aware process-local damage latch. */
 export function assertAgentDatabaseTerminalOpenAllowed(pathname: string): void {
@@ -312,7 +345,7 @@ export function closeCachedOpenClawAgentDatabase(
   if (lease) {
     releaseOpenClawAgentDatabaseLease(
       lease.leaseId,
-      { env: lease.env },
+      { env: lease.env, initializationAgentPaths: [database.path] },
       clean ?? (retainRuntimeProof ? "uncheckpointed" : undefined),
     );
     cache.leases.delete(database.path);
@@ -428,7 +461,10 @@ export function settleOpenClawAgentDatabaseWorkerClose(
     const lease = cache.leases.get(resolvedPath);
     if (lease) {
       try {
-        releaseOpenClawAgentDatabaseLease(lease.leaseId, { env: lease.env });
+        releaseOpenClawAgentDatabaseLease(lease.leaseId, {
+          env: lease.env,
+          initializationAgentPaths: [resolvedPath],
+        });
         cache.leases.delete(resolvedPath);
       } catch (error) {
         errors.push(error instanceof Error ? error : new Error(String(error)));

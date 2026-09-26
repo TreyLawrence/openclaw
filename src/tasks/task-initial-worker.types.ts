@@ -1,4 +1,7 @@
-import type { DetachedTaskTerminalState } from "./detached-task-runtime-contract.js";
+import type {
+  CreatedDetachedTaskRun,
+  DetachedTaskTerminalState,
+} from "./detached-task-runtime-contract.js";
 import type {
   InitialTaskFlowCreateInput,
   InitialTaskFlowCreateResult,
@@ -13,6 +16,8 @@ import type {
   TaskNotificationDeliveryUpdate,
 } from "./task-notification.operation.js";
 import type { TaskCreateInput, TaskCreateResult } from "./task-registry-create.kernel.js";
+import type { TaskRetentionWriteResult } from "./task-registry-retention-receipt.js";
+import type { TaskRetentionInput } from "./task-registry-retention.operation.js";
 import type {
   TaskRecordTransitionReceipt,
   TaskWorkerTransitionInput,
@@ -24,6 +29,7 @@ import type {
 } from "./task-registry.types.js";
 
 export type TaskInitialWorkerOperations = {
+  "tasks.applyRetention": { input: TaskRetentionInput; output: TaskRetentionWriteResult };
   "tasks.transitionRunRow": {
     input: Extract<TaskWorkerTransitionInput, { kind: "state" | "delivery" }>;
     output: TaskRecordTransitionReceipt | null;
@@ -32,7 +38,7 @@ export type TaskInitialWorkerOperations = {
     input: {
       taskId: string;
       expectedTask: TaskPersistenceReceipt;
-      params: { runId: string; executionOwner?: TaskExecutionOwner };
+      params: { runId: string; executionOwner?: TaskExecutionOwner; clearLastToolName?: true };
       now: number;
     };
     output: TaskRecordTransitionReceipt | null;
@@ -50,10 +56,11 @@ export type TaskInitialWorkerOperations = {
     input: {
       taskId: string;
       expectedTask: TaskPersistenceReceipt;
-      params: { runId: string; runtime: TaskRuntime; sessionKey?: string } & Pick<
-        DetachedTaskTerminalState,
-        "status" | "endedAt" | "error" | "terminalSummary"
-      >;
+      params: {
+        runId: string;
+        runtime: TaskRuntime;
+        sessionKey?: string;
+      } & Parameters<CreatedDetachedTaskRun["finalizeActive"]>[0];
       now: number;
     };
     output: TaskRecordTransitionReceipt | null;

@@ -171,6 +171,7 @@ suite.define(() => {
         const settledTop = await thread.evaluate((element) => element.scrollTop);
         for (let line = 13; line <= 16; line++) {
           await streamLine(line);
+          await expect.poll(() => thread.textContent()).toContain(`Streaming finding ${line}.`);
           await waitForChatScrollIdle(page);
           expect(await card.getAttribute("open")).toBeNull();
           expect(await thread.evaluate((element) => element.scrollTop)).toBe(settledTop);
@@ -187,6 +188,7 @@ suite.define(() => {
         // Streaming follows the end after an explicit return and manual reopen.
         for (let line = 17; line <= 20; line++) {
           await streamLine(line);
+          await expect.poll(() => thread.textContent()).toContain(`Streaming finding ${line}.`);
           await waitForChatScrollIdle(page);
           expect(await card.getAttribute("open")).toBe("");
           expect(await chatThreadDistanceFromBottom(page)).toBeLessThanOrEqual(
@@ -486,7 +488,7 @@ suite.define(() => {
           ts: Date.now(),
         });
         await expect
-          .poll(() => runRow.locator(".chat-working-indicator__preamble").textContent())
+          .poll(() => runRow.locator(".chat-text").last().textContent())
           .toContain(`Commentary stage ${step}.`);
         await waitForChatScrollIdle(page);
         const preamble = await dockGeometry(page);
@@ -544,7 +546,7 @@ suite.define(() => {
           },
         );
         await expect
-          .poll(() => runRow.locator(".chat-working-indicator__preamble").textContent())
+          .poll(() => runRow.locator(".chat-text").last().textContent())
           .toContain(`Commentary stage ${step}.`);
         await waitForChatScrollIdle(page);
         const after = await dockGeometry(page);

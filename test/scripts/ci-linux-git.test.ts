@@ -373,6 +373,19 @@ posixIt(
     );
     expect(harnessFetch.args).toEqual(expect.arrayContaining(["--filter=blob:none"]));
     expect(harnessFetch.args.at(-1)).toBe(`+${harness}:refs/remotes/origin/ci-harness`);
+    const sparseCheckout = expectDefined(
+      harnessCommands.find(({ args }) => args[0] === "sparse-checkout"),
+      "harness sparse checkout",
+    );
+    for (const file of [
+      "scripts/ci-npm-lock-admission.mjs",
+      "scripts/generate-npm-package-lock.mjs",
+      "scripts/generate-npm-package-lock.mts",
+      "scripts/changed-lanes.mts",
+      "scripts/lib/merge-head-diff-base.mjs",
+    ]) {
+      expect(sparseCheckout.args).toContain(`/${file}`);
+    }
     // The selected checkout still needs real file contents, so it must stay unfiltered.
     const workspaceFetch = expectDefined(
       report.fetches.find(({ cwd }) => cwd === report.workspace),
@@ -1368,10 +1381,25 @@ posixIt.each([
       workflowRuns: [
         {
           id: 122,
+          run_attempt: 1,
           created_at: "2026-08-28T20:00:00Z",
           status: "completed",
           conclusion: "success",
           head_sha: moved,
+        },
+      ],
+      workflowJobs: [
+        {
+          runId: 122,
+          runAttempt: 1,
+          jobs: [
+            {
+              name: "update-docs",
+              status: "completed",
+              conclusion: "success",
+              steps: [{ name: "Run Codex docs agent", status: "completed", conclusion: "success" }],
+            },
+          ],
         },
       ],
       commandResults: {
@@ -1387,7 +1415,26 @@ posixIt.each([
       ...(probe === 128 ? [["rev-parse", `${candidate}^`]] : []),
     ]);
     expect(report.githubOutput).toBe(code === 0 ? agentOutput(reviewBase) : "");
-    expect(report.commands.filter(({ tool }) => tool === "gh")).toHaveLength(1);
+    expect(report.commands.filter(({ tool }) => tool === "gh").map(({ args }) => args)).toEqual([
+      [
+        "api",
+        "--method",
+        "GET",
+        "repos/fixture/checkout/actions/workflows/docs-agent.yml/runs",
+        "-f",
+        "branch=main",
+        "-f",
+        "event=workflow_run",
+        "-f",
+        "per_page=100",
+      ],
+      [
+        "api",
+        "--paginate",
+        "--slurp",
+        "repos/fixture/checkout/actions/runs/122/attempts/1/jobs?per_page=100",
+      ],
+    ]);
     expect(backoffs(report)).toEqual([]);
   },
   55_000,

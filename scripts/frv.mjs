@@ -30,6 +30,22 @@ import {
 } from "./lib/actions-artifact-archive.mjs";
 import { execPlainGh, plainGhAuthenticatedEnv, resolvePlainGhBin } from "./lib/plain-gh.mjs";
 import {
+  RELEASE_PRIORITY_RECORD_KIND,
+  RELEASE_PRIORITY_VARIABLE,
+  defaultReleasePriorityRecordPath,
+  describeRun,
+  isDeferrableRun,
+  isDeferredCiJobSet,
+  isQueuedRun,
+  listReleasePriorityRuns,
+  mergeReleasePriorityRecord,
+  readReleasePriorityRecord,
+  selectDeferredRunCandidates,
+  selectLatestRunsPerLane,
+  selectQueuedRunsToCancel,
+  writeReleasePriorityRecord,
+} from "./lib/release-priority.mjs";
+import {
   createReleaseEvidenceClient,
   releaseExecutionPlanRestoreContract,
   restoreOriginalPublicationAdmission,
@@ -113,6 +129,10 @@ function parseArgs(argv) {
       options.job = requiredValue(argv[++index], "--job");
     } else if (argument === "--failed") {
       options.failedOnly = true;
+    } else if (argument === "--restore") {
+      options.restore = requiredValue(argv[++index], "--restore");
+    } else if (argument === "--out") {
+      options.outPath = requiredValue(argv[++index], "--out");
     } else if (argument === "--json") {
       options.json = true;
     } else if (argument === "--dry-run") {
@@ -121,13 +141,22 @@ function parseArgs(argv) {
       throw new Error(`unknown argument: ${argument}`);
     }
   }
-  if (!["continue", "rerun", "status", "verify"].includes(command)) {
+  if (!["continue", "prioritize", "rerun", "status", "verify"].includes(command)) {
     throw new Error(
-      "usage: pnpm frv <status|continue|rerun|verify> --run <id> [--failed | --job <child>:<name>]",
+      "usage: pnpm frv <status|continue|rerun|verify|prioritize> --run <id> [--failed | --job <child>:<name>] | pnpm frv prioritize --restore <record>",
     );
   }
-  if (!/^[1-9][0-9]*$/u.test(options.runId)) {
-    throw new Error("--run must be a positive decimal");
+  const restoring = command === "prioritize" && options.restore !== undefined;
+  if (restoring ? options.runId !== "" : !/^[1-9][0-9]*$/u.test(options.runId)) {
+    throw new Error(
+      restoring ? "--restore does not take --run" : "--run must be a positive decimal",
+    );
+  }
+  if (
+    (options.restore !== undefined || options.outPath !== undefined) &&
+    command !== "prioritize"
+  ) {
+    throw new Error("--restore and --out are valid only with prioritize");
   }
   if (command === "continue" && !options.failedOnly) {
     throw new Error("continue requires --failed");
@@ -135,8 +164,8 @@ function parseArgs(argv) {
   if (command !== "continue" && options.failedOnly) {
     throw new Error("--failed is valid only with continue");
   }
-  if (command !== "continue" && command !== "rerun" && options.dryRun) {
-    throw new Error("--dry-run is valid only with continue or rerun");
+  if (!["continue", "prioritize", "rerun"].includes(command) && options.dryRun) {
+    throw new Error("--dry-run is valid only with continue, rerun, or prioritize");
   }
   if (command === "rerun") {
     parseJobSelector(options.job);
@@ -257,21 +286,6 @@ function readFreshGhApi(repository, path, args = [], options = {}) {
 
 async function ghJson(repository, path, options) {
   return JSON.parse(await readFreshGhApi(repository, path, [], options));
-}
-
-async function ghAttemptJobs(repository, runId, runAttempt, options) {
-  const output = await readFreshGhApi(
-    repository,
-    `actions/runs/${runId}/attempts/${runAttempt}/jobs?per_page=100`,
-    ["--paginate", "--jq", ".jobs[] | @json"],
-    options,
-  );
-  return output
-    ? output
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => JSON.parse(line))
-    : [];
 }
 
 async function downloadExecutionPlan(repository, runId) {
@@ -807,7 +821,20 @@ export function createClient(repository, dependencies = {}) {
   const execute = dependencies.execCommand ?? execCommand;
   const attemptJobs =
     dependencies.getAttemptJobs ??
-    ((runId, runAttempt, options) => ghAttemptJobs(repository, runId, runAttempt, options));
+    (async (runId, runAttempt, options) => {
+      const output = await apiText(
+        "actions/runs/" + runId + "/attempts/" + runAttempt + "/jobs?per_page=100",
+        ".jobs[] | @json",
+        [],
+        options,
+      );
+      return output
+        ? output
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => JSON.parse(line))
+        : [];
+    });
   const verify = async (runId, plan, operationDeadline, expectedRunAttempts) => {
     const sourceSha = plan.trustedWorkflow?.sha;
     return execute(
@@ -884,22 +911,23 @@ export function createClient(repository, dependencies = {}) {
         return apiText(path, undefined, [], options);
       }
     },
-    async getManualRetryAuthority(plan, childKey, operationDeadline) {
-      const { verifyReleaseFlakeManualRetryAuthority } =
-        await import("./full-release-flake-retry.mjs");
-      const options = { operationDeadline };
-      return verifyReleaseFlakeManualRetryAuthority({
-        plan,
-        childKey,
-        client: {
-          getRun: (id) => client.getRun(id, options),
-          getAttempt: (id, attempt) => client.getRunAttempt(id, attempt, options),
-          getJobs: (id, attempt) => client.getAttemptJobs(id, attempt, options),
-          getLog: (id) => client.getJobLog(id, options),
-        },
-      });
-    },
     rerunFailed: (runId) => rerun(runId, "rerun-failed-jobs"),
+    cancelRun: (runId) => rerun(runId, "cancel"),
+    rerunRun: (runId) => rerun(runId, "rerun"),
+    listRuns: (query) => listReleasePriorityRuns(query, apiJson, apiText),
+    async getVariable(name) {
+      try {
+        return String((await apiJson(`actions/variables/${name}`)).value ?? "");
+      } catch (error) {
+        if (/HTTP 404|Not Found/u.test(String(error?.stderr ?? error?.message ?? ""))) {
+          return "";
+        }
+        throw error;
+      }
+    },
+    setVariable: (name, value) =>
+      mutate(["variable", "set", name, "--repo", repository, "--body", value]),
+    deleteVariable: (name) => mutate(["variable", "delete", name, "--repo", repository]),
     rerunJob: (jobId) =>
       mutate(["api", "-X", "POST", `repos/${repository}/actions/jobs/${jobId}/rerun`]),
     rerunParent: (runId) => rerun(runId, "rerun"),
@@ -1116,55 +1144,226 @@ async function selectedRerunJob(child, target, client, operationDeadline) {
   return { id, name: target.name, acceptedRunAttempt: accepted.acceptedRunAttempt };
 }
 
-function hasAutomaticRetryOwner(plan, child) {
-  return plan.knownFlakyJobs?.some((selector) => selector.startsWith(`${child.key}:`));
+export async function prioritizeRelease(parentRunId, client, options = {}) {
+  const parent = await client.getRun(parentRunId);
+  if (
+    String(parent.path ?? "").split("@", 1)[0] !==
+      ".github/workflows/full-release-validation.yml" ||
+    parent.status === "completed"
+  ) {
+    throw new Error(`run ${parentRunId} is not an active Full Release Validation parent`);
+  }
+  const queued = (
+    await Promise.all(
+      ["queued", "pending", "waiting"].map((status) => client.listRuns(`status=${status}`)),
+    )
+  ).flat();
+  const recordPath = options.outPath ?? defaultReleasePriorityRecordPath(parentRunId);
+  const candidates = selectQueuedRunsToCancel(queued, parentRunId);
+  const previous = readReleasePriorityRecord(recordPath, { optional: true });
+  const intent = mergeReleasePriorityRecord(previous, {
+    kind: RELEASE_PRIORITY_RECORD_KIND,
+    parentRunId: String(parentRunId),
+    repository: client.repository ?? DEFAULT_REPOSITORY,
+    recordedAt: new Date().toISOString(),
+    cancelled: candidates,
+  });
+  if (options.dryRun) {
+    return { action: "would-prioritize", record: intent, recordPath };
+  }
+  // Recovery intent and the gate both land before the first cancellation.
+  writeReleasePriorityRecord(recordPath, intent);
+  await client.setVariable(RELEASE_PRIORITY_VARIABLE, String(parentRunId));
+  const cancelled = [];
+  const failures = [];
+  const skipped = [];
+  for (const run of candidates) {
+    // Only a run that is still queued at this instant is cancelled.
+    if (!isQueuedRun(await client.getRun(run.id))) {
+      skipped.push(run);
+      continue;
+    }
+    try {
+      await client.cancelRun(run.id);
+      cancelled.push(run);
+    } catch (error) {
+      failures.push(`${run.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const record = mergeReleasePriorityRecord(previous, { ...intent, cancelled });
+  writeReleasePriorityRecord(recordPath, record);
+  return { action: "prioritized", failures, record, recordPath, skipped };
 }
 
-async function inspectManualRetryOwner(plan, child, parentBinding, client, operationDeadline) {
-  if (!hasAutomaticRetryOwner(plan, child)) {
-    return { ready: true };
+export async function clearReleasePriority(client, parentRunId) {
+  if ((await client.getVariable(RELEASE_PRIORITY_VARIABLE)) !== String(parentRunId)) {
+    return false;
   }
-  remainingOperationTime(operationDeadline);
-  const options = { operationDeadline };
-  const [original, current, jobs] = await Promise.all([
-    client.getRunAttempt(parentBinding.sourceRunId, 1, options),
-    client.getRun(parentBinding.sourceRunId, options),
-    client.getParentJobs(parentBinding.sourceRunId, options),
+  await client.deleteVariable(RELEASE_PRIORITY_VARIABLE);
+  return true;
+}
+
+// Raw discovery facts bind dispatch without changing legacy pause records.
+function restoreRunFacts(run) {
+  const described = describeRun(run);
+  if (
+    !Number.isSafeInteger(run.id) ||
+    run.id < 1 ||
+    !Number.isSafeInteger(run.run_attempt) ||
+    run.run_attempt < 1 ||
+    !Number.isSafeInteger(run.workflow_id) ||
+    run.workflow_id < 1 ||
+    !described.headBranch ||
+    typeof run.head_sha !== "string" ||
+    !/^[a-f0-9]{40}$/u.test(run.head_sha) ||
+    !Number.isFinite(Date.parse(run.created_at)) ||
+    described.lane.startsWith("run:") ||
+    (run.pull_requests?.length ?? 0) > 1
+  ) {
+    throw new Error("Incomplete release-priority run identity: " + run.id);
+  }
+  return JSON.stringify([
+    described.id,
+    described.name,
+    described.lane,
+    described.event,
+    described.headBranch,
+    run.head_repository?.id,
+    run.workflow_id,
+    run.head_sha,
+    run.created_at,
+    run.run_attempt,
+    run.status,
+    run.conclusion,
   ]);
-  assertRootRunIdentity(original, { ...parentBinding, sourceRunAttempt: 1 });
-  assertRootRunIdentity(current, parentBinding, true);
-  const owners = jobs.filter((job) => job.name === `Automatic retry (${child.key})`);
-  const originalOwners = owners.filter((job) => Number(job.run_attempt) === 1);
-  const pending = { ready: false, pending: true };
-  const unresolved = {
-    ready: false,
-    error: new Error(`automatic retry original owner is missing or ambiguous: ${child.key}`),
-  };
-  if (originalOwners.length !== 1) {
-    return original.status === "completed" ? unresolved : pending;
+}
+
+async function canRestoreRun(expected, record, client) {
+  const facts = restoreRunFacts(expected);
+  const current = await client.getRun(String(expected.id));
+  if (restoreRunFacts(current) !== facts || !isDeferrableRun(current, record.parentRunId)) {
+    return false;
   }
-  if (originalOwners[0].status !== "completed") {
-    return pending;
+  if (current.status !== "completed") {
+    return false;
   }
-  const currentOwners = owners.filter(
-    (job) => Number(job.run_attempt) === Number(current.run_attempt),
+  if (current.conclusion !== "cancelled") {
+    if (!selectDeferredRunCandidates([current], record).length) {
+      return false;
+    }
+    if (
+      current.name === "CI" &&
+      !isDeferredCiJobSet(await client.getAttemptJobs(String(current.id), current.run_attempt))
+    ) {
+      return false;
+    }
+  }
+  // Finish awaited attempt/job work before this last, branch-scoped inventory.
+  // It includes the candidate itself, so both its exact attempt and its lane are
+  // revalidated together. Reuse complete capped discovery, not a first-page probe.
+  const query = new URLSearchParams({
+    created: ">=" + expected.created_at,
+    branch: expected.head_branch,
+  });
+  const latest = await client.listRuns(query.toString());
+  const candidate = latest.find((run) => String(run.id) === String(expected.id));
+  if (!candidate || restoreRunFacts(candidate) !== facts) {
+    return false;
+  }
+  const lane = describeRun(expected).lane;
+  for (const run of latest) {
+    if (
+      run.id <= expected.id ||
+      run.name !== expected.name ||
+      !isDeferrableRun(run, record.parentRunId)
+    ) {
+      continue;
+    }
+    // Missing PR metadata cannot prove independence for the same source branch.
+    // Distinct PRs (including forks with identical branch names) remain independent.
+    const otherLane = describeRun(run).lane;
+    if (
+      otherLane === lane ||
+      otherLane.startsWith("run:") ||
+      (run.pull_requests?.length ?? 0) > 1 ||
+      (run.head_repository?.id === expected.head_repository?.id &&
+        (!lane.startsWith("pr:") || !otherLane.startsWith("pr:")))
+    ) {
+      return false;
+    }
+  }
+  // GitHub has no compare-and-rerun API. This narrows, but cannot atomically
+  // close, races during that last inventory read or between its response and the POST.
+  return true;
+}
+
+export async function restoreReleasePriority(recordPath, client, options = {}) {
+  const record = readReleasePriorityRecord(recordPath);
+  // Close the pause window first so nothing defers while the batch is collected.
+  const cleared = options.dryRun ? false : await clearReleasePriority(client, record.parentRunId);
+  const runs = await client.listRuns(`created=${encodeURIComponent(`>=${record.recordedAt}`)}`);
+  const deferred = [];
+  for (const run of selectDeferredRunCandidates(runs, record)) {
+    if (
+      run.conclusion === "skipped" ||
+      isDeferredCiJobSet(await client.getAttemptJobs(String(run.id), run.run_attempt))
+    ) {
+      deferred.push(describeRun(run));
+    }
+  }
+  const observed = new Map(runs.map((run) => [String(run.id), run]));
+  const cancelled = [];
+  for (const saved of record.cancelled) {
+    // Older records predate lane identity, and a prior restore can have rerun the same ID.
+    const current = observed.get(saved.id) ?? (await client.getRun(saved.id));
+    if (String(current.id) !== saved.id) {
+      throw new Error(`Cancelled workflow run identity changed: ${saved.id}`);
+    }
+    observed.set(saved.id, current);
+    if (current.status === "completed" && current.conclusion === "cancelled") {
+      cancelled.push(describeRun(current));
+    }
+  }
+  const candidates = [...cancelled, ...deferred];
+  const eligible = new Set(candidates.map((run) => run.id));
+  // Manual dispatches have independent concurrency and cannot replace a PR check.
+  const laneRuns = runs.filter((run) => isDeferrableRun(run, record.parentRunId)).map(describeRun);
+  // A newer active or already-executed PR run owns its lane even when it was not deferred.
+  const rerun = selectLatestRunsPerLane([...candidates, ...laneRuns]).filter((run) =>
+    eligible.has(run.id),
   );
-  if (currentOwners.some((job) => job.status !== "completed")) {
-    return pending;
+  if (options.dryRun) {
+    return { action: "would-restore", deferred, rerun };
   }
-  if (currentOwners.length > 1) {
-    return current.status === "completed"
-      ? {
-          ready: false,
-          error: new Error(`automatic retry current owner is ambiguous: ${child.key}`),
-        }
-      : pending;
+  const failures = [];
+  const skipped = [];
+  const attempted = [];
+  for (const run of rerun) {
+    try {
+      if (!(await canRestoreRun(observed.get(run.id), record, client))) {
+        skipped.push(run);
+        continue;
+      }
+      attempted.push(run);
+      await client.rerunRun(run.id);
+    } catch (error) {
+      failures.push(`${run.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
-  if (currentOwners.length === 0 && current.status !== "completed") {
-    return pending;
+  return { action: "restored", cleared, failures, rerun: attempted, skipped };
+}
+
+// A sealed parent releases hosted-runner priority; a failure here never undoes the seal.
+async function releaseSealedPriority(client, parentRunId) {
+  try {
+    if (await clearReleasePriority(client, parentRunId)) {
+      console.log(`[frv] cleared ${RELEASE_PRIORITY_VARIABLE} (${parentRunId})`);
+    }
+  } catch (error) {
+    console.warn(
+      `[frv] ${RELEASE_PRIORITY_VARIABLE} not cleared: ${error instanceof Error ? error.message : String(error)}; run pnpm frv prioritize --restore <record>`,
+    );
   }
-  remainingOperationTime(operationDeadline);
-  return { ready: true, parentRunAttempt: Number(current.run_attempt) };
 }
 
 export async function continueFailed(plan, rootRunId, client, options = {}) {
@@ -1214,32 +1413,6 @@ export async function continueFailed(plan, rootRunId, client, options = {}) {
         ready = [selected];
       }
     }
-    const admission = await Promise.all(
-      ready.map(async (child) => {
-        const owner = await inspectManualRetryOwner(
-          plan,
-          child,
-          parentBinding,
-          client,
-          operationDeadline,
-        );
-        if (!owner.ready || !hasAutomaticRetryOwner(plan, child) || child.effectiveRunAttempt > 1) {
-          return owner;
-        }
-        try {
-          await client.getManualRetryAuthority(plan, child.key, operationDeadline);
-          return owner;
-        } catch (error) {
-          if (error?.code === "FRV_PARENT_PROVENANCE") {
-            throw error;
-          }
-          return { ready: false, error };
-        }
-      }),
-    );
-    let pendingOwners = admission.some((owner) => owner.pending);
-    let heldOwner = admission.find((owner) => owner.error);
-    ready = ready.filter((_child, index) => admission[index].ready);
     if (ready.length > 0) {
       if (options.dryRun) {
         if (target) {
@@ -1247,7 +1420,7 @@ export async function continueFailed(plan, rootRunId, client, options = {}) {
         }
         return { action: "would-rerun", status };
       }
-      let requests = await Promise.all(
+      const requests = await Promise.all(
         ready.map(async (child) => {
           const job = target
             ? await selectedRerunJob(child, target, client, operationDeadline)
@@ -1290,14 +1463,6 @@ export async function continueFailed(plan, rootRunId, client, options = {}) {
         operationDeadline,
       });
       // Finish admission for the whole batch before any sibling can send a POST.
-      const finalOwners = await Promise.all(
-        requests.map(({ child }) =>
-          inspectManualRetryOwner(plan, child, parentBinding, client, operationDeadline),
-        ),
-      );
-      pendingOwners ||= finalOwners.some((owner) => owner.pending);
-      heldOwner ??= finalOwners.find((owner) => owner.error);
-      requests = requests.filter((_request, index) => finalOwners[index].ready);
       await Promise.all(
         requests.map(async ({ child }) => {
           const current = exactTerminalRunState(
@@ -1310,75 +1475,58 @@ export async function continueFailed(plan, rootRunId, client, options = {}) {
           }
         }),
       );
-      if (requests.length > 0 && plan.knownFlakyJobs?.length > 0) {
-        const parent = await client.getRun(rootRunId, { operationDeadline });
-        assertRootRunIdentity(parent, parentBinding, true);
-        for (const owner of finalOwners) {
-          if (owner.parentRunAttempt !== undefined) {
-            assertRootRunIdentity(
-              parent,
-              { ...parentBinding, sourceRunAttempt: owner.parentRunAttempt },
-              true,
-            );
-            if (Number(parent.run_attempt) !== owner.parentRunAttempt) {
-              pendingOwners = true;
-              requests = [];
-            }
-          }
-        }
+      assertRootRunIdentity(
+        await client.getRun(rootRunId, { operationDeadline }),
+        parentBinding,
+        true,
+      );
+      const minimumAttempts = new Map(
+        requests.map(({ child }) => [child.runId, child.effectiveRunAttempt + 1]),
+      );
+      remainingOperationTime(operationDeadline);
+      const sentRunIds = new Set();
+      const mutationResults = await Promise.allSettled(
+        requests.map(async ({ child, job }) => {
+          remainingOperationTime(operationDeadline);
+          sentRunIds.add(child.runId);
+          await (job ? client.rerunJob(job.id) : client.rerunFailed(child.runId));
+        }),
+      );
+      if (sentRunIds.size > 0) {
+        await reconcileAttemptStarts(
+          new Map([...minimumAttempts].filter(([runId]) => sentRunIds.has(runId))),
+          priorRuns,
+          client,
+          mutationResults.filter((_result, index) => sentRunIds.has(requests[index].child.runId)),
+          operationDeadline,
+        );
       }
-      if (requests.length > 0) {
-        const minimumAttempts = new Map(
-          requests.map(({ child }) => [child.runId, child.effectiveRunAttempt + 1]),
-        );
-        remainingOperationTime(operationDeadline);
-        const sentRunIds = new Set();
-        const mutationResults = await Promise.allSettled(
-          requests.map(async ({ child, job }) => {
-            remainingOperationTime(operationDeadline);
-            sentRunIds.add(child.runId);
-            await (job ? client.rerunJob(job.id) : client.rerunFailed(child.runId));
-          }),
-        );
-        if (sentRunIds.size > 0) {
-          await reconcileAttemptStarts(
-            new Map([...minimumAttempts].filter(([runId]) => sentRunIds.has(runId))),
-            priorRuns,
-            client,
-            mutationResults.filter((_result, index) => sentRunIds.has(requests[index].child.runId)),
-            operationDeadline,
-          );
-        }
-        const admissionFailure = mutationResults.find(
-          (result, index) =>
-            result.status === "rejected" && !sentRunIds.has(requests[index].child.runId),
-        );
-        if (admissionFailure) {
-          throw admissionFailure.reason;
-        }
-        for (const { child, job } of requests) {
-          if (!sentRunIds.has(child.runId)) {
-            continue;
-          }
-          const runAttempt = minimumAttempts.get(child.runId);
-          ownedAttempts.set(child.runId, runAttempt);
-          reruns.push({
-            child: child.key,
-            runId: child.runId,
-            sourceRunAttempt: child.effectiveRunAttempt,
-            runAttempt,
-            ...(job
-              ? { jobName: job.name, jobId: job.id, acceptedRunAttempt: job.acceptedRunAttempt }
-              : {}),
-          });
-        }
-        continue;
+      const admissionFailure = mutationResults.find(
+        (result, index) =>
+          result.status === "rejected" && !sentRunIds.has(requests[index].child.runId),
+      );
+      if (admissionFailure) {
+        throw admissionFailure.reason;
       }
+      for (const { child, job } of requests) {
+        if (!sentRunIds.has(child.runId)) {
+          continue;
+        }
+        const runAttempt = minimumAttempts.get(child.runId);
+        ownedAttempts.set(child.runId, runAttempt);
+        reruns.push({
+          child: child.key,
+          runId: child.runId,
+          sourceRunAttempt: child.effectiveRunAttempt,
+          runAttempt,
+          ...(job
+            ? { jobName: job.name, jobId: job.id, acceptedRunAttempt: job.acceptedRunAttempt }
+            : {}),
+        });
+      }
+      continue;
     }
-    if (status.active.length === 0 && !pendingArtifactProducers && !pendingOwners) {
-      if (heldOwner) {
-        throw heldOwner.error;
-      }
+    if (status.active.length === 0 && !pendingArtifactProducers) {
       break;
     }
     await sleep(
@@ -2066,8 +2214,28 @@ function print(value, json) {
       `${child.key}: ${child.status} attempt=${child.effectiveRunAttempt} planned=${child.plannedRunAttempt} run=${child.runId}`,
     );
   }
+  for (const run of value.record?.cancelled ?? value.rerun ?? []) {
+    console.log(`${run.name} ${run.id} ${run.headBranch} ${run.url}`);
+  }
+  for (const run of value.skipped ?? []) {
+    const operation = value.action === "restored" ? "rerun" : "cancellation";
+    console.log(
+      `skipped (${operation} not attempted): ${run.name} ${run.id} ${run.headBranch} ${run.url}`,
+    );
+  }
+  if (value.action === "restored" && value.skipped?.length) {
+    console.log(
+      "Inspect the skipped runs and their latest PR checks, then preview with pnpm frv prioritize --restore <record> --dry-run using the same record and same --repo. Restore without --dry-run only if those checks still need recovery.",
+    );
+  }
+  for (const failure of value.failures ?? []) {
+    console.log(`failure: ${failure}`);
+  }
   if (value.action) {
     console.log(`action: ${value.action}`);
+  }
+  if (value.recordPath) {
+    console.log(`record: ${value.recordPath}`);
   }
   if (value.finalRunId) {
     console.log(`final run: https://github.com/openclaw/openclaw/actions/runs/${value.finalRunId}`);
@@ -2086,10 +2254,23 @@ async function main() {
     return;
   }
   const client = createClient(options.repository);
+  if (options.command === "prioritize") {
+    print(
+      options.restore === undefined
+        ? await prioritizeRelease(options.runId, client, {
+            dryRun: options.dryRun,
+            outPath: options.outPath,
+          })
+        : await restoreReleasePriority(options.restore, client, { dryRun: options.dryRun }),
+      options.json,
+    );
+    return;
+  }
   if (options.command === "verify") {
     const plan = await loadPlan(options);
     const evidence = await client.verify(options.runId, plan, createOperationDeadline());
     console.log(evidence);
+    await releaseSealedPriority(client, options.runId);
     return;
   }
   const plan = await loadPlan(options);
@@ -2097,13 +2278,14 @@ async function main() {
     print(await inspectContinuation(plan, client), options.json);
     return;
   }
-  print(
-    await continueFailed(plan, options.runId, client, {
-      dryRun: options.dryRun,
-      job: options.job,
-    }),
-    options.json,
-  );
+  const result = await continueFailed(plan, options.runId, client, {
+    dryRun: options.dryRun,
+    job: options.job,
+  });
+  print(result, options.json);
+  if (!options.dryRun && options.command === "continue") {
+    await releaseSealedPriority(client, options.runId);
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

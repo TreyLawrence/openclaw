@@ -219,6 +219,22 @@ export function releaseNativeDirectChild(child: ChildState): void {
   release?.();
 }
 
+export function admitNativeChildModelExecution(
+  child: ChildState,
+  owner: ParentOwner,
+  known: KnownChild | undefined,
+): void {
+  if (known) {
+    known.configurationQualification = owner.configurationQualification;
+  }
+  child.modelExecution ??= retainNativeModelExecution(
+    owner,
+    child.nativeTurnId,
+    child.childThreadId,
+  );
+  owner.onDirectChildAccepted?.();
+}
+
 export function consumeNativeChildModelAdmission(
   evidence: Extract<NativeChildAdmissionEvidence, { kind: "interaction" }>,
 ): void {
@@ -386,6 +402,13 @@ function captureExecutionOwner(
   }
   let released = false;
   const reviewRequirement = (owner.nativeReviewRequirement ??= { required: false });
+  const assertCurrent = () => {
+    capture.assertCurrent();
+    if (owner.modelExecutionCancelled) {
+      throw new Error("Codex native model execution was cancelled");
+    }
+    assertInputCurrent();
+  };
   return {
     ...capture,
     modelMapping: owner.modelMapping,
@@ -393,22 +416,12 @@ function captureExecutionOwner(
       return reviewRequirement.required;
     },
     recordNativeReviewRequirement: (required) => {
-      capture.assertCurrent();
-      if (owner.modelExecutionCancelled) {
-        throw new Error("Codex native model execution was cancelled");
-      }
-      assertInputCurrent();
+      assertCurrent();
       if (required) {
         reviewRequirement.required = true;
       }
     },
-    assertCurrent: () => {
-      capture.assertCurrent();
-      if (owner.modelExecutionCancelled) {
-        throw new Error("Codex native model execution was cancelled");
-      }
-      assertInputCurrent();
-    },
+    assertCurrent,
     cancel: () => {
       if (!released) {
         owner.modelExecutionCancelled = true;

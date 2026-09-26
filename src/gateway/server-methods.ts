@@ -6,6 +6,7 @@ import {
 } from "../../packages/gateway-protocol/src/index.js";
 import {
   GATEWAY_RESTART_UNAVAILABLE_REASON,
+  GATEWAY_SUSPEND_IDENTITY_RETRY_AFTER_MS,
   GATEWAY_SUSPEND_UNAVAILABLE_REASON,
 } from "../../packages/gateway-protocol/src/restart-unavailable.js";
 import {
@@ -230,6 +231,14 @@ export async function authorizeGatewayRequestPreDispatch(params: {
           params.context,
         ),
     );
+  const startupError = () =>
+    params.context.unavailableGatewayMethods?.has(params.method)
+      ? errorShape(ErrorCodes.UNAVAILABLE, `${params.method} unavailable during gateway startup`, {
+          retryable: true,
+          retryAfterMs: GATEWAY_STARTUP_RETRY_AFTER_MS,
+          details: { ...gatewayStartupUnavailableDetails(), method: params.method },
+        })
+      : null;
   while (true) {
     const scopeAuthorization = authorizeMethod();
     if (scopeAuthorization.error) {
@@ -261,18 +270,9 @@ export async function authorizeGatewayRequestPreDispatch(params: {
     }
     // Startup gating precedes session authorization: session stores are not loaded yet,
     // so an authorization read here would deny with a misleading non-retryable error.
-    if (params.context.unavailableGatewayMethods?.has(params.method)) {
-      return {
-        error: errorShape(
-          ErrorCodes.UNAVAILABLE,
-          `${params.method} unavailable during gateway startup`,
-          {
-            retryable: true,
-            retryAfterMs: GATEWAY_STARTUP_RETRY_AFTER_MS,
-            details: { ...gatewayStartupUnavailableDetails(), method: params.method },
-          },
-        ),
-      };
+    const unavailableError = startupError();
+    if (unavailableError) {
+      return { error: unavailableError };
     }
     if (params.method.startsWith("sessions.groups.")) {
       const { ensureSessionGroupCatalog } = await import("./session-group-catalog.js");
@@ -287,7 +287,9 @@ export async function authorizeGatewayRequestPreDispatch(params: {
     }
     const sessionPolicy = params.methodRegistry.getSessionAccess?.(params.method);
     const projection =
-      params.method === "sessions.describe" && !isGatewayAdmin(params.client)
+      !sessionPolicy &&
+      resolveDirectSessionTargets(params.method, params.requestParams).length > 0 &&
+      !isGatewayAdmin(params.client)
         ? getSessionRowProjection(params.context)
         : undefined;
     const authorizeSession = (sessionRowRead?: SessionRowReadView) =>
@@ -358,9 +360,19 @@ export async function authorizeGatewayRequestPreDispatch(params: {
       };
     }
     const currentAuthorization = authorizeMethod();
-    if (currentAuthorization.error) {
+    const currentError = currentAuthorization.error ?? startupError();
+    if (currentError) {
       sessionAccessAuthority?.release();
-      return { error: currentAuthorization.error };
+      return { error: currentError };
+    }
+    try {
+      params.expectedProfileBinding?.assertCurrent();
+    } catch (error) {
+      sessionAccessAuthority?.release();
+      if (error instanceof SessionMutationAuthorizationChangedError) {
+        return { error: error.error };
+      }
+      throw error;
     }
     if (currentAuthorization.sessionScope !== scopeAuthorization.sessionScope) {
       sessionAccessAuthority?.release();
@@ -476,7 +488,10 @@ export async function runWithGatewayRequestEnvelope<T>(
         `${method} unavailable during gateway ${restartDraining ? "restart" : "suspension"}`,
         {
           retryable: true,
-          retryAfterMs: 1_000,
+          retryAfterMs:
+            !restartDraining && method === "agent.identity.get"
+              ? GATEWAY_SUSPEND_IDENTITY_RETRY_AFTER_MS
+              : 1_000,
           details: {
             method,
             reason: restartDraining
