@@ -1,9 +1,5 @@
 /** Lifecycle-owned model catalog access. */
 import { getRuntimeConfig } from "../config/config.js";
-import {
-  findConfiguredProviderModel,
-  resolveMergedModelProviderConfig,
-} from "../config/model-provider-config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   listAgentIds,
@@ -24,6 +20,12 @@ import {
   loadPreparedModelRuntimeAuth,
   bindPreparedModelRuntimeAuth,
 } from "./prepared-model-runtime-auth.js";
+import {
+  getPreparedModelRuntimeBorrowedSnapshot,
+  getPreparedModelRuntimePluginGeneration,
+} from "./prepared-model-runtime-generation-scope.js";
+import { readCapturedPreparedModelRuntimeCatalog } from "./prepared-model-runtime.capture.js";
+import { PreparedModelRuntimePublicationSupersededError } from "./prepared-model-runtime.errors.js";
 import { isPreparedModelCatalogFull } from "./prepared-model-runtime.full-catalog.js";
 import {
   acquireAgentRunPreparedModelRuntime,
@@ -388,6 +390,25 @@ async function loadScopedReadOnlyModelCatalog(
   );
 }
 
+/** Reads only the generation retained by this exact, still-open turn. */
+function resolveAdmittedModelCatalogOwner(params: LoadPreparedModelCatalogParams) {
+  const generation = getPreparedModelRuntimePluginGeneration();
+  const owner = generation && getPreparedModelRuntimeBorrowedSnapshot(generation);
+  if (!generation || !owner || owner.metadataSnapshot !== generation.pluginMetadataSnapshot) {
+    return undefined;
+  }
+  const { full, activationFull } = resolveInputs(params);
+  const matches = [full, activationFull].some(
+    (input) =>
+      preparedModelRuntimeConfigsMatch(owner.config, input.config) &&
+      owner.agentId === input.agentId &&
+      owner.agentDir === input.agentDir &&
+      owner.inheritedAuthDir === input.inheritedAuthDir &&
+      owner.workspaceDir === input.workspaceDir,
+  );
+  return matches ? { generation, owner } : undefined;
+}
+
 /**
  * Missing turn-path capabilities do not authorize another inventory, even without a published
  * owner. Native harness observations keep their existing owner.
@@ -403,51 +424,73 @@ export async function loadProviderScopedThinkingCatalog(params: {
   workspaceDir?: string;
   /** Input preparation must resolve modalities for this route, independently of reasoning. */
   requiredInputRoute?: Pick<ModelCatalogEntry, "api" | "baseUrl">;
-  /**
-   * Transport route the admitted turn is actually using, sourced from its prepared or
-   * carried catalog row. Authored config cannot reconstruct this route when the provider
-   * has no configured api/baseUrl, so replaced-config recovery trusts it over config.
-   * Structurally typed: carried rows (ThinkingCatalogEntry) serialize api as plain string.
-   */
-  effectiveRoute?: { api?: string; baseUrl?: string };
 }): Promise<ModelCatalogEntry[]> {
   const request = { ...params, readOnly: true };
-  // "published" tolerates a runtime-config replacement that lands during this
-  // read-only lookup; "exact" fails the whole turn for a catalog the published
-  // owner still serves correctly. See PreparedModelCatalogConfigReplacedError.
-  const owner = (await resolveReadOnlyPublishedModelCatalogOwner(request, "published"))?.snapshot;
-  // A replaced-config owner's facts are only safe on the caller's transport route.
-  const ownerConfigReplaced =
-    owner !== undefined && !preparedModelRuntimeConfigsMatch(owner.config, params.config);
+  const admitted = resolveAdmittedModelCatalogOwner(request);
   let snapshot: ModelCatalogSnapshot;
-  if (owner?.loadNativeModelCatalog && params.agentRuntime && params.agentRuntime !== "openclaw") {
-    snapshot = await owner.loadNativeModelCatalog({
-      provider: params.provider,
-      modelId: params.model,
-      runtime: params.agentRuntime,
-    });
+  if (admitted) {
+    // Replacement inventory may belong to another account on the very same URL.
+    // A retained turn reads its captured facts without invoking retired owner callbacks.
+    snapshot =
+      readCapturedPreparedModelRuntimeCatalog(admitted.owner) ?? admitted.owner.modelCatalog;
+    if (
+      params.agentRuntime &&
+      params.agentRuntime !== "openclaw" &&
+      admitted.owner.loadNativeModelCatalog &&
+      admitted.owner.isCurrent()
+    ) {
+      try {
+        snapshot = await admitted.owner.loadNativeModelCatalog({
+          provider: params.provider,
+          modelId: params.model,
+          runtime: params.agentRuntime,
+        });
+      } catch (error) {
+        if (
+          !(error instanceof PreparedModelRuntimePublicationSupersededError) ||
+          admitted.owner.isCurrent()
+        ) {
+          throw error;
+        }
+        // Retirement during a native observation leaves only this turn's captured facts.
+      }
+    }
   } else {
-    // The resolved owner is always a published lifecycle owner, so completed
-    // inventory facts stay attached even when the accepted config generation
-    // differs from the caller's.
-    const catalog = owner
-      ? (await materializeRequestedModelCatalog(owner, true, undefined)).modelCatalog
-      : { entries: [], routeVariants: [] };
-    const agentId = params.agentId ?? resolveAmbientOwnerAgentId(params.config);
-    const { augmentModelCatalogWithAgentHarness } = await import("./harness/model-catalog.js");
-    snapshot = await augmentModelCatalogWithAgentHarness({
-      cfg: params.config,
-      agentId,
-      agentDir: params.agentDir ?? resolveAgentDir(params.config, agentId),
-      workspaceDir:
-        params.workspaceDir ??
-        resolveAgentWorkspaceDir(params.config, agentId) ??
-        resolveDefaultAgentWorkspaceDir(),
-      defaultProvider: params.provider,
-      defaultModel: `${params.provider}/${params.model}`,
-      agentRuntime: params.agentRuntime,
-      snapshot: catalog,
-    });
+    const owner = (await resolveReadOnlyPublishedModelCatalogOwner(request, "published"))?.snapshot;
+    if (owner && !preparedModelRuntimeConfigsMatch(owner.config, params.config)) {
+      // A caller without a matching admitted generation cannot borrow replacement facts.
+      return [];
+    }
+    if (
+      owner?.loadNativeModelCatalog &&
+      params.agentRuntime &&
+      params.agentRuntime !== "openclaw"
+    ) {
+      snapshot = await owner.loadNativeModelCatalog({
+        provider: params.provider,
+        modelId: params.model,
+        runtime: params.agentRuntime,
+      });
+    } else {
+      const catalog = owner
+        ? (await materializeRequestedModelCatalog(owner, true, undefined)).modelCatalog
+        : { entries: [], routeVariants: [] };
+      const agentId = params.agentId ?? resolveAmbientOwnerAgentId(params.config);
+      const { augmentModelCatalogWithAgentHarness } = await import("./harness/model-catalog.js");
+      snapshot = await augmentModelCatalogWithAgentHarness({
+        cfg: params.config,
+        agentId,
+        agentDir: params.agentDir ?? resolveAgentDir(params.config, agentId),
+        workspaceDir:
+          params.workspaceDir ??
+          resolveAgentWorkspaceDir(params.config, agentId) ??
+          resolveDefaultAgentWorkspaceDir(),
+        defaultProvider: params.provider,
+        defaultModel: `${params.provider}/${params.model}`,
+        agentRuntime: params.agentRuntime,
+        snapshot: catalog,
+      });
+    }
   }
   let entries = snapshot.entries;
   if (params.agentRuntime) {
@@ -464,33 +507,8 @@ export async function loadProviderScopedThinkingCatalog(params: {
     }
   }
   entries = normalizeThinkingCatalogProviders(entries);
-  if (ownerConfigReplaced) {
-    // Keep thinking facts on the active turn's model route: a hot reload may have
-    // changed the provider's api or baseUrl, and applying the replaced owner's row
-    // to the caller's route could suppress supported thinking or send unsupported
-    // parameters. An unconfigured caller route stays unconstrained, because
-    // modelTransportRoutesMatch falls back to the entry's own fields. Dropping the
-    // entry retains caller-configured facts: authored model rows early-return
-    // upstream of this function (applyModelDefaults fills their reasoning/input),
-    // and hydration callers keep their existing catalog when no row resolves here.
-    // The caller's carried catalog row names the turn's actual transport; authored config
-    // fills each field the row omits, so a partial row never widens the match to a
-    // wildcard that would discard the captured config's route.
-    const providerConfig = resolveMergedModelProviderConfig(params.config, params.provider);
-    const configuredModel = findConfiguredProviderModel(
-      providerConfig,
-      params.provider,
-      params.model,
-    );
-    const callerRoute = {
-      api: params.effectiveRoute?.api ?? configuredModel?.api ?? providerConfig?.api,
-      baseUrl:
-        params.effectiveRoute?.baseUrl ?? configuredModel?.baseUrl ?? providerConfig?.baseUrl,
-    };
-    const recovered = findModelInCatalog(entries, params.provider, params.model);
-    if (recovered && !modelTransportRoutesMatch(recovered, callerRoute)) {
-      entries = entries.filter((candidate) => candidate !== recovered);
-    }
+  if (admitted && getPreparedModelRuntimeBorrowedSnapshot(admitted.generation) !== admitted.owner) {
+    return [];
   }
   if (params.requiredInputRoute !== undefined) {
     const entry = findModelInCatalog(entries, params.provider, params.model);

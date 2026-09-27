@@ -139,10 +139,8 @@ async function resolveCronThinkingCatalog(params: {
   if (!needsThinkHydration(catalog, params.provider, params.model, params.agentRuntime)) {
     return catalog;
   }
-  // The carried row hydration would replace names the turn's actual transport route.
-  const carried = findModelInCatalog(catalog, params.provider, params.model);
   // Thinking capability is a per-model fact; never materialize the full live catalog on cron turns.
-  return normalizeThinkingCatalogProviders(
+  const refreshed = normalizeThinkingCatalogProviders(
     await loadProviderScopedThinkingCatalog({
       config: params.owner.config,
       provider: params.provider,
@@ -151,9 +149,9 @@ async function resolveCronThinkingCatalog(params: {
       agentId: params.owner.agentId,
       agentDir: params.owner.agentDir,
       workspaceDir: params.owner.workspaceDir,
-      ...(carried ? { effectiveRoute: { api: carried.api, baseUrl: carried.baseUrl } } : {}),
     }),
   );
+  return findModelInCatalog(refreshed, params.provider, params.model) ? refreshed : catalog;
 }
 
 export async function resolveCronThinkingSelection(params: {

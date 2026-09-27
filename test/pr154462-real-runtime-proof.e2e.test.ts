@@ -1,18 +1,4 @@
-/**
- * Real runtime proof for PR #154462: a runtime-config replacement published while a turn
- * is mid-run no longer kills the turn at its next model-capability read. A visible
- * chat.send turn starts against the loopback provider, the provider holds the primary
- * model call open while a real config.patch publishes generation B through the Gateway's
- * hot-reload path (replacing the prepared model runtime owner), and the turn — still
- * carrying config generation A — fails over to its fallback model. That failover's
- * capability read (resolveRunModelHasVision → loadProviderScopedThinkingCatalog, caller
- * config A vs published owner B) completes against the published owner instead of
- * throwing PreparedModelCatalogConfigReplacedError.
- *
- * The harness supplies only the loopback provider and its response gates; the gateway,
- * WebSocket RPC client, config write path, hot reload, and failover runner are the real
- * ones.
- */
+/** Real Gateway reload/failover proof with final-request account and capability checks. */
 import fs from "node:fs/promises";
 import { createServer, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -22,6 +8,7 @@ import {
   getPreparedModelCatalogOwnerSnapshot,
   loadProviderScopedThinkingCatalog,
 } from "../src/agents/prepared-model-catalog.js";
+import { registerPreparedModelRuntimePublicationListener } from "../src/agents/prepared-model-runtime.publication-events.js";
 import {
   clearConfigCache,
   clearRuntimeConfigSnapshot,
@@ -34,6 +21,8 @@ import {
   startGatewayWithClient,
 } from "../src/gateway/test-helpers.e2e.js";
 import { captureEnv, setTestEnvValue } from "../src/test-utils/env.js";
+import { createSolidPngBuffer } from "./helpers/image-fixtures.js";
+import { createDeferred } from "./helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "./helpers/temp-dir.js";
 
 const envKeys = [
@@ -52,14 +41,18 @@ const envKeys = [
 ] as const;
 
 const PROVIDER_ID = "mock-anthropic";
+const PLUGIN_ID = "catalog-reload-proof";
 const PRIMARY_MODEL_ID = "claude-opus-5";
-const FALLBACK_MODEL_ID = "claude-haiku-5";
+const FALLBACK_MODEL_ID = "catalog-only-fallback";
 const TOKEN = "pr154462-proof-token";
 const REPLY_MARKER = "PR154462_TURN_COMPLETED_AFTER_REPLACEMENT";
 
+const ACCOUNT_A = "fixture-account-a-v1";
+const ACCOUNT_A_REFRESHED = "fixture-account-a-v2";
+const ACCOUNT_B = "fixture-account-b";
+
 const epoch = performance.now();
 function proof(event: string, data: Record<string, unknown> = {}): void {
-  // The captured terminal output is the evidence this proof exists to produce.
   console.log(
     JSON.stringify({
       proof: true,
@@ -121,7 +114,7 @@ function buildMockAnthropicProvider(baseUrl: string) {
   // capabilities through loadProviderScopedThinkingCatalog on the real turn path.
   const config: Omit<ModelProviderConfig, "models"> & { models: [ModelDefinitionConfig] } = {
     baseUrl,
-    apiKey: "sk-ant-api03-pr154462-proof", // pragma: allowlist secret
+    apiKey: ACCOUNT_A,
     api: "anthropic-messages",
     models: [model],
   };
@@ -133,29 +126,48 @@ function buildMockAnthropicProvider(baseUrl: string) {
   } as const;
 }
 
-describe("PR #154462 real runtime proof", () => {
+type ProviderRequest = {
+  model: string;
+  credential: "A-original" | "A-refreshed" | "B" | "unknown";
+  thinking: { type?: string; budget_tokens?: number } | null;
+  imageCount: number;
+};
+
+describe("runtime-config replacement during a turn", () => {
   const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
   it(
-    "keeps a turn alive across a runtime-config replacement published mid-run",
+    "keeps admitted request facts across same-account refresh and same-route account replacement",
     { timeout: 120_000 },
     async () => {
       const envSnapshot = captureEnv([...envKeys]);
       let providerServer: ReturnType<typeof createServer> | undefined;
       let gateway: Awaited<ReturnType<typeof startGatewayWithClient>> | undefined;
-      const providerRequests: string[] = [];
-      // The proof turn's primary-model call parks here until the test fails it.
-      let heldPrimaryResponse: ServerResponse | undefined;
-      let resolvePrimaryHeld = () => {};
-      const primaryHeld = new Promise<void>((resolve) => {
-        resolvePrimaryHeld = resolve;
-      });
-      let holdNextPrimaryCall = false;
-      let failPrimaryCalls = false;
-      let dummyServer: ReturnType<typeof createServer> | undefined;
-
+      const requests: ProviderRequest[] = [];
+      const catalogRequests: ProviderRequest["credential"][] = [];
+      let catalogModels: ModelDefinitionConfig[] = [];
+      const identifyCredential = (key: unknown): ProviderRequest["credential"] =>
+        key === ACCOUNT_A
+          ? "A-original"
+          : key === ACCOUNT_A_REFRESHED
+            ? "A-refreshed"
+            : key === ACCOUNT_B
+              ? "B"
+              : "unknown";
+      const image = createSolidPngBuffer(8, 8, { r: 40, g: 100, b: 180 }).toString("base64");
+      const expectRichRequest = (request: ProviderRequest) => {
+        expect(request.imageCount).toBe(1);
+        expect(request.thinking?.type).toMatch(/^(enabled|adaptive)$/);
+        if (request.thinking?.type === "enabled") {
+          expect(request.thinking.budget_tokens).toBeGreaterThan(0);
+        }
+      };
+      let heldResponse: ServerResponse | undefined;
+      let onPrimaryHeld: (response: ServerResponse) => void = () => {};
+      let holdPrimary = false;
+      let failPrimary = false;
       try {
-        const tempHome = tempDirs.make("openclaw-pr154462-proof-");
+        const tempHome = tempDirs.make("openclaw-config-reload-proof-");
         const stateDir = path.join(tempHome, ".openclaw");
         const workspaceDir = path.join(tempHome, "workspace");
         const configPath = path.join(stateDir, "openclaw.json");
@@ -163,7 +175,7 @@ describe("PR #154462 real runtime proof", () => {
         await Promise.all([
           fs.mkdir(workspaceDir, { recursive: true }),
           fs.mkdir(bundledPluginsDir, { recursive: true }),
-          fs.mkdir(path.dirname(configPath), { recursive: true }),
+          fs.mkdir(stateDir, { recursive: true }),
         ]);
         for (const [key, value] of Object.entries({
           HOME: tempHome,
@@ -181,26 +193,102 @@ describe("PR #154462 real runtime proof", () => {
         })) {
           setTestEnvValue(key, value);
         }
-
+        const pluginDir = path.join(tempHome, "provider-plugin");
+        const pluginFile = path.join(pluginDir, "index.mjs");
+        await fs.mkdir(pluginDir, { recursive: true });
+        await fs.writeFile(
+          path.join(pluginDir, "openclaw.plugin.json"),
+          JSON.stringify({
+            id: PLUGIN_ID,
+            providers: [PROVIDER_ID],
+            providerCatalogEntry: "./provider-discovery.mjs",
+            modelCatalog: { discovery: { [PROVIDER_ID]: "runtime" }, runtimeAugment: true },
+            configSchema: { type: "object", properties: {}, additionalProperties: false },
+          }),
+        );
+        await fs.writeFile(
+          path.join(pluginDir, "provider-discovery.mjs"),
+          `export default {
+            id: ${JSON.stringify(PROVIDER_ID)}, label: "Reload proof provider", auth: [],
+            catalog: { order: "simple", async run(ctx) {
+              const configured = ctx.config.models.providers[${JSON.stringify(PROVIDER_ID)}];
+              const auth = ctx.resolveProviderApiKey(${JSON.stringify(PROVIDER_ID)});
+              const key = auth.discoveryApiKey ?? auth.apiKey;
+              if (!key) throw new Error("Fixture catalog has no materialized credential");
+              const response = await fetch(configured.baseUrl + "/models", {
+                headers: { "x-api-key": key }, signal: ctx.signal,
+              });
+              if (!response.ok) throw new Error("Fixture catalog authentication failed");
+              const result = await response.json();
+              return { provider: { ...configured, models: result.models } };
+            } },
+          };`,
+        );
+        await fs.writeFile(
+          pluginFile,
+          `import provider from "./provider-discovery.mjs";
+          export default { id: ${JSON.stringify(PLUGIN_ID)}, register(api) { api.registerProvider(provider); } };`,
+        );
         providerServer = createServer((request, response) => {
+          const credential = identifyCredential(request.headers["x-api-key"]);
+          if (credential === "unknown") {
+            response.writeHead(401, { "content-type": "application/json" });
+            response.end(
+              JSON.stringify({
+                type: "error",
+                error: { type: "authentication_error", message: "unknown fixture account" },
+              }),
+            );
+            return;
+          }
+          if (request.url === "/models") {
+            catalogRequests.push(credential);
+            const rich = credential !== "B";
+            response.writeHead(200, { "content-type": "application/json" });
+            response.end(
+              JSON.stringify({
+                models: catalogModels.map((model) =>
+                  Object.assign({}, model, {
+                    reasoning: rich,
+                    input: rich ? ["text", "image"] : ["text"],
+                  } satisfies Pick<ModelDefinitionConfig, "reasoning" | "input">),
+                ),
+              }),
+            );
+            return;
+          }
           let body = "";
           request.setEncoding("utf8");
           request.on("data", (chunk) => {
             body += chunk;
           });
           request.on("end", () => {
-            const parsed = JSON.parse(body) as { model?: string };
+            const parsed = JSON.parse(body) as {
+              model?: string;
+              thinking?: ProviderRequest["thinking"];
+              messages?: Array<{ content?: string | Array<{ type?: string }> }>;
+            };
             const model = parsed.model ?? "";
-            providerRequests.push(model);
-            if (holdNextPrimaryCall && model === PRIMARY_MODEL_ID) {
-              holdNextPrimaryCall = false;
-              heldPrimaryResponse = response;
-              resolvePrimaryHeld();
+            requests.push({
+              model,
+              credential,
+              thinking: parsed.thinking ?? null,
+              imageCount: (parsed.messages ?? []).reduce(
+                (count, message) =>
+                  count +
+                  (Array.isArray(message.content)
+                    ? message.content.filter((part) => part.type === "image").length
+                    : 0),
+                0,
+              ),
+            });
+            if (holdPrimary && model === PRIMARY_MODEL_ID) {
+              holdPrimary = false;
+              heldResponse = response;
+              onPrimaryHeld(response);
               return;
             }
-            // After the held call fails, retried primary calls fail the same way so the
-            // runner's next candidate is the fallback model.
-            if (failPrimaryCalls && model === PRIMARY_MODEL_ID) {
+            if (failPrimary && model === PRIMARY_MODEL_ID) {
               response.writeHead(404, { "content-type": "application/json" });
               response.end(
                 JSON.stringify({
@@ -218,252 +306,270 @@ describe("PR #154462 real runtime proof", () => {
           });
         });
         await new Promise<void>((resolve, reject) => {
-          providerServer?.once("error", reject);
-          providerServer?.listen(0, "127.0.0.1", resolve);
+          providerServer!.once("error", reject);
+          providerServer!.listen(0, "127.0.0.1", resolve);
         });
-        const providerAddress = providerServer.address();
-        if (!providerAddress || typeof providerAddress === "string") {
-          throw new Error("proof provider did not bind a loopback port");
+        const address = providerServer.address();
+        if (!address || typeof address === "string") {
+          throw new Error("loopback provider did not bind");
         }
-        const provider = buildMockAnthropicProvider(`http://127.0.0.1:${providerAddress.port}`);
-        const cfg = {
-          agents: {
-            defaults: {
-              workspace: workspaceDir,
-              skipBootstrap: true,
-              model: { primary: provider.primaryRef, fallbacks: [provider.fallbackRef] },
-              thinkingDefault: "low",
-            },
-            entries: { main: { default: true } },
-          },
-          models: { mode: "replace", providers: { [provider.providerId]: provider.config } },
-          gateway: { auth: { mode: "token", token: TOKEN } },
-        };
-        const sessionKey = "agent:main:pr154462-proof";
+        const provider = buildMockAnthropicProvider(`http://127.0.0.1:${address.port}`);
+        catalogModels = [
+          ...provider.config.models,
+          { ...provider.config.models[0], id: FALLBACK_MODEL_ID, name: "Discovered fallback" },
+        ];
         gateway = await startGatewayWithClient({
-          cfg,
+          cfg: {
+            plugins: {
+              allow: [PLUGIN_ID],
+              load: { paths: [pluginFile] },
+              entries: { [PLUGIN_ID]: { enabled: true } },
+            },
+            agents: {
+              defaults: {
+                workspace: workspaceDir,
+                skipBootstrap: true,
+                model: { primary: provider.primaryRef, fallbacks: [provider.fallbackRef] },
+                thinkingDefault: "low",
+              },
+              entries: { main: { default: true } },
+            },
+            models: { mode: "merge", providers: { [PROVIDER_ID]: provider.config } },
+            gateway: { auth: { mode: "token", token: TOKEN } },
+          },
           configPath,
           token: TOKEN,
-          clientDisplayName: "pr154462-proof",
+          clientDisplayName: "config-reload-proof",
           scopes: ["operator.admin", "operator.read", "operator.write"],
-          // Models hot reloads are classified irreversible and refuse to apply without
-          // a restart recovery owner; a real Gateway always runs with one (gateway-cli).
           hotReloadRecovery: () => ({ status: "emitted" as const }),
         });
         const client = gateway.client;
-        proof("gateway_ready", { port: gateway.port });
-
-        const rpc = async <T>(method: string, params: unknown): Promise<T> => {
-          proof("rpc_request", { method, params });
-          const result = await client.request<T>(method, params, { timeoutMs: 60_000 });
-          proof("rpc_response", { method, result });
-          return result;
-        };
-
-        // Baseline: a real turn completes against the loopback provider under config A.
-        const warmup = await rpc<{ runId?: string; status?: string }>("chat.send", {
-          sessionKey,
-          message: "warmup turn",
-          deliver: false,
-          idempotencyKey: "pr154462-warmup",
-        });
-        expect(warmup.status).toBe("started");
-        const warmupWaited = await rpc<{ status?: string }>("agent.wait", {
-          runId: warmup.runId,
-          timeoutMs: 30_000,
-        });
-        expect(warmupWaited).toMatchObject({ status: "ok" });
-        proof("warmup_completed", { providerRequests: [...providerRequests] });
-
-        // The published runtime config object IS generation A: the running turn carries it.
-        const configA = getRuntimeConfig();
-        proof("config_a_owner_published", {
-          ownerForConfigA: getPreparedModelCatalogOwnerSnapshot({ config: configA }) !== undefined,
-        });
-
-        // Start the proof turn and park its primary-model call inside the provider, so the
-        // run holds its lease and captured config generation A while the replacement lands.
-        holdNextPrimaryCall = true;
-        const held = await rpc<{ runId?: string; status?: string }>("chat.send", {
-          sessionKey,
-          message: "proof turn across config replacement",
-          deliver: false,
-          idempotencyKey: "pr154462-held-turn",
-        });
-        expect(held.status).toBe("started");
-        await primaryHeld;
-        proof("primary_call_held", { runId: held.runId, providerRequests: [...providerRequests] });
-
-        // Publish generation B through the real gateway write path: config.patch persists
-        // the delta and applies the hot reload, which republishes the prepared model
-        // runtime under the new config generation while the turn is mid-call.
-        const before = await rpc<{ hash: string }>("config.get", {});
-        const patched = await rpc<{ hash?: string }>("config.patch", {
-          baseHash: before.hash,
-          raw: JSON.stringify({ agents: { defaults: { thinkingDefault: "medium" } } }),
-        });
-        expect(patched.hash).toEqual(expect.any(String));
-        const configB = getRuntimeConfig();
-        proof("config_b_published", {
-          runtimeConfigReplaced: configB !== configA,
-          ownerForConfigA: getPreparedModelCatalogOwnerSnapshot({ config: configA }) !== undefined,
-          ownerForConfigB: getPreparedModelCatalogOwnerSnapshot({ config: configB }) !== undefined,
-        });
-        expect(configB).not.toBe(configA);
-        // The published owner no longer serves generation A: exactly the replaced-config
-        // window the running turn's next capability read executes in.
-        expect(getPreparedModelCatalogOwnerSnapshot({ config: configA })).toBeUndefined();
-        expect(getPreparedModelCatalogOwnerSnapshot({ config: configB })).toBeDefined();
-
-        // Fail the held primary call as model_not_found: the runner immediately fails over
-        // to the (undeclared) fallback model, and resolveRunModelHasVision hydrates its
-        // capabilities through loadProviderScopedThinkingCatalog with config A.
-        const requestsBeforeFailover = providerRequests.length;
-        if (!heldPrimaryResponse) {
-          throw new Error("primary call was not held");
-        }
-        failPrimaryCalls = true;
-        heldPrimaryResponse.writeHead(404, { "content-type": "application/json" });
-        heldPrimaryResponse.end(
-          JSON.stringify({
-            type: "error",
-            error: { type: "not_found_error", message: `model: ${PRIMARY_MODEL_ID}` },
-          }),
-        );
-        proof("primary_call_failed", { runId: held.runId });
-
-        const waited = await rpc<{ status?: string }>("agent.wait", {
-          runId: held.runId,
-          timeoutMs: 30_000,
-        });
-        proof("held_turn_terminal", {
-          waited,
-          modelsAfterFailover: providerRequests.slice(requestsBeforeFailover),
-        });
-        expect(waited).toMatchObject({ status: "ok" });
-        // The failover attempt's capability read survived the replacement and the fallback
-        // request reached the real transport.
-        expect(providerRequests.slice(requestsBeforeFailover)).toContain(FALLBACK_MODEL_ID);
-
-        const history = await rpc<{ messages?: unknown[] }>("chat.history", {
-          sessionKey,
-          limit: 20,
-        });
-        const serialized = JSON.stringify(history.messages ?? []);
-        expect(serialized).toContain(REPLY_MARKER);
-        expect(serialized).not.toContain("PreparedModelCatalogConfigReplacedError");
-        proof("history_verified", { markerPresent: serialized.includes(REPLY_MARKER) });
-
-        // Retained capabilities: the same in-process read the turn path performs, with the
-        // stale generation-A config, still resolves the published owner's capability facts.
-        const staleRead = await loadProviderScopedThinkingCatalog({
-          config: configA,
-          provider: PROVIDER_ID,
-          model: PRIMARY_MODEL_ID,
-        });
-        const staleEntry = staleRead.find(
-          (entry) => entry.provider === PROVIDER_ID && entry.id === PRIMARY_MODEL_ID,
-        );
-        proof("stale_config_read", {
-          entries: staleRead.length,
-          reasoning: staleEntry?.reasoning,
-          input: staleEntry?.input,
-        });
-        expect(staleEntry).toMatchObject({ reasoning: true, input: ["text", "image"] });
-        proof("scenario_pass", { sessionKey });
-
-        // Model-affecting replacement: a second real config.patch moves the provider to a
-        // different loopback route (a bound listener that never receives traffic). The same
-        // stale generation-A read must NOT adopt the rerouted owner's capability facts.
-        dummyServer = createServer(() => {});
-        await new Promise<void>((resolve, reject) => {
-          dummyServer?.once("error", reject);
-          dummyServer?.listen(0, "127.0.0.1", resolve);
-        });
-        const dummyAddress = dummyServer.address();
-        if (!dummyAddress || typeof dummyAddress === "string") {
-          throw new Error("dummy reroute listener did not bind a loopback port");
-        }
-        const reroutedBaseUrl = `http://127.0.0.1:${dummyAddress.port}`;
-        const beforeReroute = await rpc<{ hash: string }>("config.get", {});
-        const rerouted = await rpc<{ hash?: string }>("config.patch", {
-          baseHash: beforeReroute.hash,
-          raw: JSON.stringify({
-            models: {
-              providers: {
-                [provider.providerId]: { ...provider.config, baseUrl: reroutedBaseUrl },
-              },
+        const patchConfig = async (models: ModelProviderConfig) => {
+          const before = await client.request<{ hash: string }>("config.get", {});
+          const patched = await client.request<{ hash?: string }>(
+            "config.patch",
+            {
+              baseHash: before.hash,
+              replacePaths: [`models.providers.${PROVIDER_ID}.models[].input`],
+              raw: JSON.stringify({ models: { providers: { [PROVIDER_ID]: models } } }),
             },
-          }),
-        });
-        expect(rerouted.hash).toEqual(expect.any(String));
-        expect(getRuntimeConfig()).not.toBe(configB);
-        proof("model_affecting_config_published", { reroutedBaseUrl });
-        const guardedRead = await loadProviderScopedThinkingCatalog({
-          config: configA,
-          provider: PROVIDER_ID,
-          model: PRIMARY_MODEL_ID,
-        });
-        const guardedEntry = guardedRead.find(
-          (entry) => entry.provider === PROVIDER_ID && entry.id === PRIMARY_MODEL_ID,
-        );
-        proof("model_affecting_replacement_guarded", {
-          entries: guardedRead.length,
-          entryPresent: guardedEntry !== undefined,
-          entryBaseUrl: guardedEntry?.baseUrl,
-          reroutedBaseUrl,
-        });
-        expect(guardedEntry).toBeUndefined();
-
-        // Catalog-sourced route: a generation-A caller whose authored config never named the
-        // provider (its transport came from its earlier catalog row, e.g. plugin discovery)
-        // cannot be constrained by config alone — without the turn's effective route the
-        // rerouted owner's facts are adopted; passing the warmup turn's route (the first
-        // loopback baseUrl, carried on its catalog row) drops them.
-        const warmupBaseUrl = provider.config.baseUrl;
-        const configANoAuthoredRoute = {
-          ...configA,
-          models: { mode: "replace" as const, providers: {} },
+            { timeoutMs: 60_000 },
+          );
+          expect(patched.hash).toEqual(expect.any(String));
         };
-        const unguardedCatalogRouteRead = await loadProviderScopedThinkingCatalog({
-          config: configANoAuthoredRoute,
-          provider: PROVIDER_ID,
-          model: PRIMARY_MODEL_ID,
-        });
-        const unguardedCatalogRouteEntry = unguardedCatalogRouteRead.find(
-          (entry) => entry.provider === PROVIDER_ID && entry.id === PRIMARY_MODEL_ID,
-        );
-        expect(unguardedCatalogRouteEntry?.baseUrl).toBe(reroutedBaseUrl);
-        const catalogRouteRead = await loadProviderScopedThinkingCatalog({
-          config: configANoAuthoredRoute,
-          provider: PROVIDER_ID,
-          model: PRIMARY_MODEL_ID,
-          effectiveRoute: { api: "anthropic-messages", baseUrl: warmupBaseUrl },
-        });
-        const catalogRouteEntry = catalogRouteRead.find(
-          (entry) => entry.provider === PROVIDER_ID && entry.id === PRIMARY_MODEL_ID,
-        );
-        proof("catalog_sourced_route_guarded", {
-          effectiveBaseUrl: warmupBaseUrl,
-          reroutedBaseUrl,
-          unguardedEntryBaseUrl: unguardedCatalogRouteEntry?.baseUrl,
-          guardedEntryPresent: catalogRouteEntry !== undefined,
-        });
-        expect(catalogRouteEntry).toBeUndefined();
-      } finally {
-        if (gateway) {
-          await disconnectGatewayClient(gateway.client).catch(() => undefined);
-          await gateway.server.close().catch(() => undefined);
+        const refreshCatalog = async (rich: boolean) => {
+          const requestsBefore = catalogRequests.length;
+          const committed = createDeferred<void>();
+          const checkReady = () => {
+            const owner = getPreparedModelCatalogOwnerSnapshot({ config: getRuntimeConfig() });
+            const catalog = owner?.readFullModelCatalog?.() ?? owner?.modelCatalog;
+            const model = catalog?.entries.find(
+              (entry) => entry.provider === PROVIDER_ID && entry.id === FALLBACK_MODEL_ID,
+            );
+            const ready =
+              catalogRequests.length > requestsBefore &&
+              !catalog?.pendingProviders?.includes(PROVIDER_ID) &&
+              model?.reasoning === rich &&
+              model.input?.includes("image") === rich;
+            if (ready) {
+              committed.resolve();
+            }
+            return ready;
+          };
+          const unsubscribe = registerPreparedModelRuntimePublicationListener((event) => {
+            if (event.phase === "catalog-failed") {
+              committed.reject(event.error);
+            } else if (event.phase === "catalog-published") {
+              checkReady();
+            }
+          });
+          try {
+            await Promise.all([
+              client
+                .request(
+                  "models.list",
+                  { agentId: "main", provider: PROVIDER_ID, refresh: true },
+                  { timeoutMs: 60_000 },
+                )
+                .then(() => {
+                  const ready = checkReady();
+                  const owner = getPreparedModelCatalogOwnerSnapshot({
+                    config: getRuntimeConfig(),
+                  });
+                  const catalog = owner?.readFullModelCatalog?.() ?? owner?.modelCatalog;
+                  proof("catalog_refresh_observed", {
+                    rich,
+                    ready,
+                    requests: [...catalogRequests],
+                    pending: catalog?.pendingProviders ?? [],
+                    entries: catalog?.entries.length ?? 0,
+                  });
+                  if (!ready && !catalog?.pendingProviders?.includes(PROVIDER_ID)) {
+                    throw new Error(
+                      "Catalog refresh settled without the requested provider inventory",
+                    );
+                  }
+                }),
+              committed.promise,
+            ]);
+          } finally {
+            unsubscribe();
+          }
+          const facts = await loadProviderScopedThinkingCatalog({
+            config: getRuntimeConfig(),
+            provider: PROVIDER_ID,
+            model: FALLBACK_MODEL_ID,
+          });
+          expect(facts).toContainEqual(
+            expect.objectContaining({
+              id: FALLBACK_MODEL_ID,
+              reasoning: rich,
+              input: rich ? ["text", "image"] : ["text"],
+            }),
+          );
+          proof("catalog_ready", { credential: catalogRequests.at(-1), rich });
+        };
+        const send = async (sessionKey: string, id: string, withImage = false) => {
+          const started = await client.request<{ status?: string; runId?: string }>("chat.send", {
+            sessionKey,
+            message: "Reply with a short answer.",
+            deliver: false,
+            idempotencyKey: id,
+            ...(withImage
+              ? {
+                  attachments: [
+                    {
+                      type: "image",
+                      mimeType: "image/png",
+                      fileName: "sample.png",
+                      content: `data:image/png;base64,${image}`,
+                    },
+                  ],
+                }
+              : {}),
+          });
+          expect(started.status).toBe("started");
+          return started;
+        };
+        const waitForRun = async (runId: string | undefined) => {
+          const result = await client.request<{ status?: string }>(
+            "agent.wait",
+            { runId, timeoutMs: 30_000 },
+            { timeoutMs: 60_000 },
+          );
+          expect(result).toMatchObject({ status: "ok" });
+        };
+        await waitForRun((await send("agent:main:reload-warmup", "reload-warmup")).runId);
+        await refreshCatalog(true);
+        const beforeBaseline = requests.length;
+        failPrimary = true;
+        await waitForRun((await send("agent:main:reload-baseline", "reload-baseline", true)).runId);
+        failPrimary = false;
+        const baseline = requests
+          .slice(beforeBaseline)
+          .find((request) => request.model === FALLBACK_MODEL_ID);
+        if (!baseline) {
+          throw new Error("no fallback request in the no-reload control");
         }
-        if (dummyServer?.listening) {
-          await new Promise<void>((resolve) => {
-            dummyServer?.close(() => resolve());
+        expect(baseline.credential).toBe("A-original");
+        expectRichRequest(baseline);
+        const admittedShape = { thinking: baseline.thinking, imageCount: baseline.imageCount };
+        proof("baseline_request_verified", { credential: baseline.credential, ...admittedShape });
+        const scenarios = [
+          {
+            name: "same-account-refresh",
+            replacementKey: ACCOUNT_A_REFRESHED,
+            nextCredential: "A-refreshed",
+          },
+          { name: "same-route-account-switch", replacementKey: ACCOUNT_B, nextCredential: "B" },
+        ] as const;
+        for (const [scenarioIndex, scenario] of scenarios.entries()) {
+          if (scenarioIndex > 0) {
+            await patchConfig(provider.config);
+          }
+          await refreshCatalog(true);
+          const capturedConfig = getRuntimeConfig();
+          const configuredOwner = getPreparedModelCatalogOwnerSnapshot({ config: capturedConfig });
+          expect(configuredOwner).toBeDefined();
+          const carriedFallback = configuredOwner?.modelCatalog.entries.find(
+            (entry) => entry.provider === PROVIDER_ID && entry.id === FALLBACK_MODEL_ID,
+          );
+          expect(carriedFallback?.input?.includes("image") ?? false).toBe(false);
+          const primaryHeld = new Promise<ServerResponse>((resolve) => {
+            onPrimaryHeld = resolve;
+          });
+          holdPrimary = true;
+          failPrimary = false;
+          heldResponse = undefined;
+          const sessionKey = `agent:main:${scenario.name}`;
+          const held = await send(sessionKey, scenario.name, true);
+          const admittedResponse = await primaryHeld;
+          const richReplacement = scenario.replacementKey !== ACCOUNT_B;
+          const replacement: ModelProviderConfig = {
+            ...provider.config,
+            apiKey: scenario.replacementKey,
+            models: provider.config.models.map((model) =>
+              Object.assign({}, model, {
+                reasoning: richReplacement,
+                input: richReplacement ? ["text", "image"] : ["text"],
+              } satisfies Pick<ModelDefinitionConfig, "reasoning" | "input">),
+            ),
+          };
+          await patchConfig(replacement);
+          const replacementConfig = getRuntimeConfig();
+          expect(replacementConfig).not.toBe(capturedConfig);
+          expect(getPreparedModelCatalogOwnerSnapshot({ config: capturedConfig })).toBeUndefined();
+          await refreshCatalog(richReplacement);
+          expect(catalogRequests).toContain(scenario.nextCredential);
+          const beforeFailover = requests.length;
+          failPrimary = true;
+          admittedResponse.writeHead(404, { "content-type": "application/json" });
+          admittedResponse.end(
+            JSON.stringify({
+              type: "error",
+              error: { type: "not_found_error", message: `model: ${PRIMARY_MODEL_ID}` },
+            }),
+          );
+          await waitForRun(held.runId);
+          const finalRequest = requests
+            .slice(beforeFailover)
+            .find((request) => request.model === FALLBACK_MODEL_ID);
+          expect(finalRequest).toBeDefined();
+          expect(finalRequest!.credential).toBe("A-original");
+          expectRichRequest(finalRequest!);
+          const shape = { thinking: finalRequest!.thinking, imageCount: finalRequest!.imageCount };
+          expect(shape).toEqual(admittedShape);
+          const history = await client.request<{ messages?: unknown[] }>("chat.history", {
+            sessionKey,
+            limit: 20,
+          });
+          expect(JSON.stringify(history.messages)).toContain(REPLY_MARKER);
+          failPrimary = false;
+          const beforeNewTurn = requests.length;
+          await waitForRun(
+            (await send(`agent:main:${scenario.name}-new`, `${scenario.name}-new`)).runId,
+          );
+          expect(
+            requests.slice(beforeNewTurn).find((request) => request.model === PRIMARY_MODEL_ID)
+              ?.credential,
+          ).toBe(scenario.nextCredential);
+          proof("final_request_verified", {
+            scenario: scenario.name,
+            admittedCredential: finalRequest!.credential,
+            nextTurnCredential: scenario.nextCredential,
+            ...shape,
+            persistedReply: true,
           });
         }
+      } finally {
+        heldResponse?.destroy();
+        if (gateway) {
+          await disconnectGatewayClient(gateway.client);
+          await gateway.server.close();
+        }
         if (providerServer?.listening) {
-          heldPrimaryResponse?.destroy();
           await new Promise<void>((resolve) => {
-            providerServer?.close(() => resolve());
+            providerServer!.close(() => resolve());
           });
         }
         envSnapshot.restore();

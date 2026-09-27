@@ -278,7 +278,6 @@ describe("createModelSelectionState catalog loading", () => {
         provider: "openai",
         model: "gpt-5.4",
         agentRuntime: agentRuntime ?? "openclaw",
-        effectiveRoute: { api: undefined, baseUrl: "https://api.openai.com/v1" },
       });
     },
   );
