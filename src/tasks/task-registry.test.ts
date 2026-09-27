@@ -76,15 +76,12 @@ import {
   findTaskByRunId,
   getTaskById,
   isParentFlowLinkError,
-  listTasksForOwnerKey,
-  listTasksForRelatedSessionKey,
   listTaskRecords,
   linkTaskToFlowById,
   maybeDeliverTaskTerminalUpdate,
   markTaskRunningByRunId,
   markTaskTerminalById,
   recordTaskProgressByRunId,
-  resolveTaskForLookupToken,
   updateTaskNotifyPolicyById,
 } from "./task-registry.js";
 import { registerTaskRegistryScheduledMaintenanceTests } from "./task-registry.maintenance-scheduling.test-utils.js";
@@ -97,13 +94,16 @@ import {
   previewTaskRegistryMaintenance,
   reconcileInspectableTasks,
   runTaskRegistryMaintenance,
-  sweepTaskRegistry,
 } from "./task-registry.maintenance.js";
 import {
   configureTaskRegistryMaintenanceRuntimeForTest,
   resetTaskRegistryMaintenanceMocks,
   createAcpSessionStoreEntry,
 } from "./task-registry.maintenance.test-support.js";
+import {
+  registerTaskRegistryLookupTests,
+  registerTaskRegistrySummaryTests,
+} from "./task-registry.queries.test-utils.js";
 import { configureTaskRegistryRuntime, getTaskRegistryStore } from "./task-registry.store.js";
 import { summarizeTaskRecords } from "./task-registry.summary.js";
 import {
@@ -1200,50 +1200,7 @@ describe("task-registry", () => {
     });
   });
 
-  it("summarizes task pressure by status and runtime", async () => {
-    await withTaskRegistryTempDir(async () => {
-      createTaskFixture("acp", {
-        runId: "run-summary-acp",
-        task: "Investigate issue",
-        status: "queued",
-        deliveryStatus: "pending",
-      });
-      createTaskFixture("cron", {
-        ownerKey: "",
-        scopeKind: "system",
-        runId: "run-summary-cron",
-        task: "Daily digest",
-      });
-      createTaskFixture("subagent", {
-        runId: "run-summary-subagent",
-        task: "Write patch",
-        status: "timed_out",
-        deliveryStatus: "session_queued",
-      });
-
-      expect(summarizeTaskRecords(listTaskRecords())).toEqual({
-        total: 3,
-        active: 2,
-        terminal: 1,
-        failures: 1,
-        byStatus: {
-          queued: 1,
-          running: 1,
-          succeeded: 0,
-          failed: 0,
-          timed_out: 1,
-          cancelled: 0,
-          lost: 0,
-        },
-        byRuntime: {
-          subagent: 1,
-          acp: 1,
-          cli: 0,
-          cron: 1,
-        },
-      });
-    });
-  });
+  registerTaskRegistrySummaryTests();
 
   it.each([
     {
@@ -2823,63 +2780,7 @@ describe("task-registry", () => {
     });
   });
 
-  it("restores persisted tasks from disk on the next lookup", async () => {
-    await withTaskRegistryTempDir(
-      async () => {
-        resetTaskRegistryForTests({ persist: false });
-
-        const task = createTaskFixture("subagent", {
-          childSessionKey: "agent:main:subagent:child",
-          runId: "run-restore",
-          task: "Restore me",
-          deliveryStatus: "pending",
-        });
-
-        resetTaskRegistryForTests({
-          persist: false,
-        });
-
-        expectRecordFields(resolveTaskForLookupToken(task.taskId), {
-          taskId: task.taskId,
-          runId: "run-restore",
-          task: "Restore me",
-        });
-      },
-      { durableStore: true },
-    );
-  });
-
-  it("indexes tasks by session key for latest and list lookups", async () => {
-    await withTaskRegistryTempDir(async () => {
-      const nowSpy = vi.spyOn(Date, "now");
-      nowSpy.mockReturnValue(1_700_000_000_000);
-
-      const older = createTaskFixture("acp", {
-        status: undefined,
-        deliveryStatus: undefined,
-        childSessionKey: "agent:main:subagent:child-1",
-        runId: "run-session-lookup-1",
-        task: "Older task",
-      });
-      const latest = createTaskFixture("subagent", {
-        status: undefined,
-        deliveryStatus: undefined,
-        childSessionKey: "agent:main:subagent:child-2",
-        runId: "run-session-lookup-2",
-        task: "Latest task",
-      });
-      nowSpy.mockRestore();
-
-      expect(listTasksForOwnerKey("agent:main:main")[0]?.taskId).toBe(latest.taskId);
-      expect(listTasksForOwnerKey("agent:main:main").map((task) => task.taskId)).toEqual([
-        latest.taskId,
-        older.taskId,
-      ]);
-      expect(listTasksForRelatedSessionKey("agent:main:subagent:child-1")[0]?.taskId).toBe(
-        older.taskId,
-      );
-    });
-  });
+  registerTaskRegistryLookupTests();
 
   it("retains removed background exec tasks until the process exits", async () => {
     const [
@@ -3228,6 +3129,8 @@ describe("task-registry", () => {
           cfg: {},
           sessionKey: childSessionKey,
           reason: "terminal-task-cleanup",
+          assertActive: expect.any(Function),
+          expectedControlBinding: expect.objectContaining({ ownerKey: parentSessionKey }),
         });
         expect(unbindSessionBindings).toHaveBeenCalledWith({
           targetSessionKey: childSessionKey,
@@ -3345,6 +3248,8 @@ describe("task-registry", () => {
         cfg: {},
         sessionKey: childSessionKey,
         reason: "orphaned-parent-task-cleanup",
+        assertActive: expect.any(Function),
+        expectedControlBinding: expect.objectContaining({ ownerKey: parentSessionKey }),
       });
       expect(unbindSessionBindings).toHaveBeenCalledWith({
         targetSessionKey: childSessionKey,
@@ -3371,7 +3276,7 @@ describe("task-registry", () => {
         lastEventAt: Date.now() - 8 * 24 * 60 * 60_000,
       });
 
-      expect(await sweepTaskRegistry()).toEqual({
+      expect(await runTaskRegistryMaintenance()).toEqual({
         reconciled: 0,
         recovered: 0,
         cleanupStamped: 0,
@@ -3554,7 +3459,7 @@ describe("task-registry", () => {
       snapshotTasks: [staleTask],
     });
 
-    expect(await sweepTaskRegistry()).toEqual({
+    expect(await runTaskRegistryMaintenance()).toEqual({
       reconciled: 0,
       recovered: 0,
       cleanupStamped: 0,
@@ -3588,7 +3493,7 @@ describe("task-registry", () => {
       snapshotTasks: [staleTask],
     });
 
-    expect(await sweepTaskRegistry()).toEqual({
+    expect(await runTaskRegistryMaintenance()).toEqual({
       reconciled: 0,
       recovered: 0,
       cleanupStamped: 0,

@@ -521,8 +521,6 @@ internal fun ChatScreen(
   val currentPickerOwner by rememberUpdatedState(composerOwner)
   val currentPickerMainSessionKey by rememberUpdatedState(mainSessionKey)
   val sendInFlight = composerOwner in sendStates
-  val pickerActivity = LocalActivity.current
-  val pickerView = LocalView.current
 
   // Admission reads current settings, not the last composed enabled state.
   fun currentEffortSession() =
@@ -562,20 +560,12 @@ internal fun ChatScreen(
     )
 
   val modelPicker =
-    remember(viewModel, pickerActivity, pickerView, lifecycleOwner) {
-      ChatModelPickerSessionOwner(pickerActivity, pickerView, lifecycleOwner.lifecycle) { expected ->
-        viewModel.isCurrentChatComposerOwner(expected) &&
-          viewModel.gatewayConnectionDisplay.value.isConnected &&
-          operatorScopesAllowWrite(viewModel.operatorScopes.value)
-      }
+    rememberChatPicker(viewModel) {
+      viewModel.gatewayConnectionDisplay.value.isConnected && operatorScopesAllowWrite(viewModel.operatorScopes.value)
     }
   val contextPicker =
-    remember(viewModel, pickerActivity, pickerView, lifecycleOwner) {
-      ChatModelPickerSessionOwner(pickerActivity, pickerView, lifecycleOwner.lifecycle) { expected ->
-        viewModel.isCurrentChatComposerOwner(expected) &&
-          viewModel.gatewayConnectionDisplay.value.isConnected &&
-          operatorScopesAllowRead(viewModel.operatorScopes.value)
-      }
+    rememberChatPicker(viewModel) {
+      viewModel.gatewayConnectionDisplay.value.isConnected && operatorScopesAllowRead(viewModel.operatorScopes.value)
     }
   var modelPickerPage by remember { mutableStateOf(ChatComposerPickerPage.Models) }
   var composerAnchor by remember { mutableStateOf<LayoutCoordinates?>(null) }
@@ -586,12 +576,7 @@ internal fun ChatScreen(
     if (modelPicker.visible !== previous) modelPickerPage = page
   }
 
-  val effortPicker =
-    remember(viewModel, pickerActivity, pickerView, lifecycleOwner) {
-      ChatModelPickerSessionOwner(pickerActivity, pickerView, lifecycleOwner.lifecycle) { expected ->
-        viewModel.isCurrentChatComposerOwner(expected) && (canChangeThinking() || canChangeFastMode(expected))
-      }
-    }
+  val effortPicker = rememberChatPicker(viewModel) { expected -> canChangeThinking() || canChangeFastMode(expected) }
   var effortPreview by remember(
     effortPicker.visible,
     composerOwner,
@@ -601,30 +586,10 @@ internal fun ChatScreen(
     thinkingLevelSelection.options,
     canAdminSessionSettings,
   ) { mutableStateOf<String?>(null) }
-  val backgroundTasks =
-    remember(viewModel, pickerActivity, pickerView, lifecycleOwner) {
-      ChatModelPickerSessionOwner(pickerActivity, pickerView, lifecycleOwner.lifecycle) { expected ->
-        viewModel.isCurrentChatComposerOwner(expected)
-      }
-    }
-  val reviewDiff =
-    remember(viewModel, pickerActivity, pickerView, lifecycleOwner) {
-      ChatModelPickerSessionOwner(pickerActivity, pickerView, lifecycleOwner.lifecycle) { expected ->
-        viewModel.isCurrentChatComposerOwner(expected)
-      }
-    }
-  val attachmentPicker =
-    remember(viewModel, pickerActivity, pickerView, lifecycleOwner) {
-      ChatModelPickerSessionOwner(pickerActivity, pickerView, lifecycleOwner.lifecycle) { expected ->
-        viewModel.isCurrentChatComposerOwner(expected)
-      }
-    }
-  val branchPicker =
-    remember(viewModel, pickerActivity, pickerView, lifecycleOwner) {
-      ChatModelPickerSessionOwner(pickerActivity, pickerView, lifecycleOwner.lifecycle) { expected ->
-        viewModel.isCurrentChatComposerOwner(expected)
-      }
-    }
+  val backgroundTasks = rememberChatPicker(viewModel)
+  val reviewDiff = rememberChatPicker(viewModel)
+  val attachmentPicker = rememberChatPicker(viewModel)
+  val branchPicker = rememberChatPicker(viewModel)
   var branchOpening by remember(branchPicker) { mutableStateOf<ChatBranchOpening?>(null) }
 
   fun isCurrentBranchOpening(opening: ChatBranchOpening): Boolean {
@@ -660,9 +625,9 @@ internal fun ChatScreen(
   DisposableEffect(viewModel) {
     onDispose(viewModel::stopChatMessageSpeech)
   }
-  val modelSections =
+  val modelChoices =
     remember(modelCatalog, modelFavorites, modelRecents) {
-      chatModelPickerSections(
+      chatModelPickerChoices(
         catalog = modelCatalog,
         favorites = modelFavorites,
         recents = modelRecents,
@@ -1400,7 +1365,7 @@ internal fun ChatScreen(
           }
         } else {
           ChatModelPickerContent(
-            sections = modelSections,
+            models = modelChoices,
             favorites = modelFavorites.toSet(),
             selectedModelLabel = selectedModelLabel,
             selectedModelRef = selectedModelRef,
@@ -1490,6 +1455,21 @@ internal fun ChatScreen(
         admit = { backgroundTasks.admit(opening) },
         onDismiss = { if (backgroundTasks.admit(opening)) backgroundTasks.retire(opening) },
       )
+    }
+  }
+}
+
+@Composable
+private fun rememberChatPicker(
+  viewModel: MainViewModel,
+  targetAllowed: (ChatComposerOwner) -> Boolean = { true },
+): ChatModelPickerSessionOwner {
+  val activity = LocalActivity.current
+  val view = LocalView.current
+  val lifecycleOwner = LocalLifecycleOwner.current
+  return remember(viewModel, activity, view, lifecycleOwner) {
+    ChatModelPickerSessionOwner(activity, view, lifecycleOwner.lifecycle) { expected ->
+      viewModel.isCurrentChatComposerOwner(expected) && targetAllowed(expected)
     }
   }
 }
@@ -2090,7 +2070,7 @@ private fun EmptyChatHint(
           } else {
             nativeString("Chat not ready")
           },
-        style = ClawTheme.type.title.copy(fontSize = 18.sp, lineHeight = 23.sp),
+        style = ClawTheme.type.title.copy(lineHeight = 23.sp),
         color = ClawTheme.colors.text,
       )
       Text(
@@ -2520,7 +2500,7 @@ private fun ToolActivityDisclosure(
   var expanded by rememberSaveable(stableKey) { mutableStateOf(false) }
   var showAll by rememberSaveable(stableKey) { mutableStateOf(false) }
   val summary = completedToolGroupSummary(tools)
-  val hasError = tools.any { it.isError || it.activity?.status == "failed" }
+  val hasError = tools.any { it.hasFailedOutcome }
   val hasBlocked = tools.any { it.activity?.status == "blocked" }
   val running = item.liveTools.values.any { !it.isComplete }
   val state = if (expanded) nativeString("Expanded") else nativeString("Collapsed")
@@ -2660,13 +2640,8 @@ private fun ToolActivityItem(
   var expanded by rememberSaveable(parentStableKey, saveableKey) { mutableStateOf(false) }
   val kind = completedToolKind(tool.name)
   val resultPresentation = completedToolResultPresentation(tool)
-  val liveStatus =
-    when {
-      tool.isError || tool.activity?.status == "failed" -> nativeString("Failed")
-      tool.activity?.status == "blocked" -> nativeString("Blocked")
-      live?.isComplete == false -> nativeString("OpenClaw is working")
-      else -> null
-    }
+  val isError = tool.hasFailedOutcome
+  val outcome = resultPresentation.outcome ?: if (live?.isComplete == false) nativeString("OpenClaw is working") else null
   val preview =
     tool.detail
       ?.lineSequence()
@@ -2705,7 +2680,7 @@ private fun ToolActivityItem(
       ) {
         Icon(
           imageVector =
-            if (tool.isError) {
+            if (isError) {
               Icons.Default.Close
             } else {
               when (kind) {
@@ -2718,10 +2693,10 @@ private fun ToolActivityItem(
             },
           contentDescription = null,
           modifier = Modifier.size(16.dp),
-          tint = if (tool.isError) ClawTheme.colors.danger else ClawTheme.colors.textMuted,
+          tint = if (isError) ClawTheme.colors.danger else ClawTheme.colors.textMuted,
         )
-        (liveStatus ?: resultPresentation.outcome)?.let { outcome ->
-          Text(text = outcome, style = ClawTheme.type.caption, color = if (tool.isError || tool.activity?.status in setOf("failed", "blocked")) ClawTheme.colors.danger else ClawTheme.colors.textMuted)
+        outcome?.let {
+          Text(text = it, style = ClawTheme.type.caption, color = if (isError || tool.activity?.status == "blocked") ClawTheme.colors.danger else ClawTheme.colors.textMuted)
         }
         Row(
           modifier = Modifier.weight(1f),
@@ -3107,7 +3082,7 @@ private fun ProgressCardPill(
           )
           Text(
             text = expandedActivityLabel,
-            style = ClawTheme.type.caption.copy(fontSize = 12.sp, fontWeight = FontWeight.Medium),
+            style = ClawTheme.type.caption.copy(fontWeight = FontWeight.Medium),
             color = ClawTheme.colors.textMuted,
             maxLines = 1,
           )
@@ -3226,10 +3201,10 @@ private fun PlanStepMarker(status: ChatPlanStepStatus) {
 private fun chatDraftStyle(): TextStyle = ClawTheme.type.body.copy(fontSize = 16.sp, lineHeight = 22.sp)
 
 @Composable
-private fun chatProjectStyle(): TextStyle = ClawTheme.type.caption.copy(fontSize = 11.sp, lineHeight = 13.sp, fontWeight = FontWeight.Normal)
+private fun chatProjectStyle(): TextStyle = ClawTheme.type.caption.copy(fontSize = ClawTheme.type.captionSmall.fontSize, lineHeight = 13.sp, fontWeight = FontWeight.Normal)
 
 @Composable
-private fun chatTitleStyle(): TextStyle = ClawTheme.type.title.copy(fontSize = 14.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium)
+private fun chatTitleStyle(): TextStyle = ClawTheme.type.title.copy(fontSize = ClawTheme.type.section.fontSize, lineHeight = 18.sp, fontWeight = FontWeight.Medium)
 
 @Composable
 private fun minimumChatLineHeight(style: TextStyle): Int {
@@ -3948,7 +3923,7 @@ internal fun branchMetadataText(branch: SessionBranch): String {
 
 @Composable
 private fun ChatModelPickerContent(
-  sections: ChatModelPickerSections,
+  models: List<GatewayModelSummary>,
   favorites: Set<String>,
   selectedModelLabel: String,
   selectedModelRef: String?,
@@ -3961,7 +3936,6 @@ private fun ChatModelPickerContent(
 ) {
   var query by remember { mutableStateOf("") }
   var expandedProviders by remember { mutableStateOf(emptySet<String>()) }
-  val models = sections.pinned + sections.recent + sections.remaining
   val defaultModel = models.firstOrNull { it.providerQualifiedRef() == defaultModelRef }
 
   fun matches(model: GatewayModelSummary): Boolean = query.isBlank() || listOf(model.name, model.id, providerDisplayName(model.provider)).any { it.contains(query.trim(), ignoreCase = true) }
@@ -4220,12 +4194,12 @@ private fun ChatOfflineNotice(
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
       Text(
         text = nativeString("Gateway offline"),
-        style = ClawTheme.type.caption.copy(fontSize = 12.5.sp, lineHeight = 16.sp),
+        style = ClawTheme.type.caption,
         color = ClawTheme.colors.warning,
       )
       Text(
         text = status,
-        style = ClawTheme.type.caption.copy(fontSize = 12.5.sp, lineHeight = 16.sp),
+        style = ClawTheme.type.caption,
         color = ClawTheme.colors.textMuted,
         maxLines = 2,
         overflow = TextOverflow.Ellipsis,
@@ -4368,7 +4342,7 @@ private fun ChatInputPill(
               .fillMaxWidth()
               .heightIn(min = ClawTheme.spacing.touchTarget, max = with(LocalDensity.current) { sixLines.toDp() } + 12.dp)
               .padding(vertical = 6.dp),
-            contentAlignment = Alignment.CenterStart,
+            contentAlignment = Alignment.TopStart,
           ) {
             BasicTextField(
               value = textFieldValue,
@@ -4706,7 +4680,7 @@ private fun ChatComposerModelPicker(
       Row(modifier = Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
           text = label,
-          style = ClawTheme.type.caption.copy(fontSize = 14.sp),
+          style = ClawTheme.type.caption.copy(fontSize = ClawTheme.type.body.fontSize),
           // Android supports middle ellipsis only on one line; keep both ends of the model name visible.
           maxLines = 1,
           overflow = TextOverflow.MiddleEllipsis,

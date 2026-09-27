@@ -118,7 +118,13 @@ export type DirectSpawnEvidence = {
 };
 export type NativeChildAdmissionEvidence = DirectSpawnEvidence &
   (
-    | { kind: "spawn" }
+    | {
+        kind: "spawn";
+        owner?: ParentOwner;
+        preparing?: true;
+        modelSource?: NativeModelSourceCustody;
+        completionCustody?: AgentHarnessCompletionCustody;
+      }
     | {
         kind: "interaction";
         nativeTurnId?: string;
@@ -223,6 +229,11 @@ export type KnownChild = {
     completionCustody?: AgentHarnessCompletionCustody;
   }>;
   agentPaths: Set<string>;
+};
+
+export type PreparedNativeReceiver = {
+  known: KnownChild | undefined;
+  isCurrent: () => boolean;
 };
 
 export type RecoveredCompletion = CodexNativeSubagentCompletion & {

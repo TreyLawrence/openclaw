@@ -233,6 +233,11 @@ A fully qualified `--session-key` selects its agent only when `--agent`, `--stor
 and `--all-agents` are absent. An explicitly empty or whitespace-only `--agent`
 is rejected instead of selecting an inferred agent.
 
+An explicit `--session-key` that matches no stored session exits non-zero with
+guidance for listing valid keys, and an empty or whitespace-only `--session-key`
+is rejected. Without a key, an empty selection prints
+`No sessions found.` and exits successfully, including with `--follow`.
+
 The progress view is intentionally conservative: prompt text, tool arguments,
 and tool result bodies are not printed. Tool calls show the tool name with
 `{...redacted...}`; tool results show status such as `ok`, `error`, or `done`;
@@ -324,6 +329,12 @@ When a Gateway is reachable, non-dry-run cleanup for configured agent stores is
 sent through the Gateway so it shares the same session-store writer as runtime
 traffic. Use `--store <path>` for explicit offline repair of a SQLite database or
 legacy store selector.
+
+Automatic offline fallback applies only when the configured local Gateway cannot
+be reached before connecting. A failed remote Gateway connection or
+`OPENCLAW_GATEWAY_URL` override exits with an error and leaves local stores alone,
+including when the selected URL uses a loopback SSH tunnel. Restore the remote
+connection or use `--store <path>` to explicitly select a local store.
 
 When the selected store's parent directory is named `agent`, transcript artifacts
 live in the sibling `sessions` directory. This also applies to custom paths:

@@ -379,84 +379,56 @@ internal fun onboardingFormUsesStackedLayout(
   fontScale: Float,
 ): Boolean = availableWidthDp < OnboardingFormStackBreakpointDp || fontScale >= OnboardingLargeFontScale
 
-internal data class OnboardingBackDestination(
-  val step: OnboardingStep,
-  val inlineQrScannerActive: Boolean = false,
-)
-
 internal data class OnboardingBackState(
   val step: OnboardingStep,
   val inlineQrScannerActive: Boolean = false,
-  val setupCodeEntryOpenedFromScanner: Boolean = false,
 )
-
-internal fun onboardingBackDestination(
-  step: OnboardingStep,
-  lastGatewayInputSource: OnboardingGatewayInputSource = OnboardingGatewayInputSource.SetupScanner,
-  accessStage: OnboardingAccessStage = OnboardingAccessStage.InitialApproval,
-): OnboardingBackDestination? =
-  when (step) {
-    OnboardingStep.Welcome -> {
-      null
-    }
-
-    OnboardingStep.Gateway -> {
-      OnboardingBackDestination(OnboardingStep.Welcome)
-    }
-
-    OnboardingStep.SetupCode -> {
-      OnboardingBackDestination(OnboardingStep.Gateway)
-    }
-
-    OnboardingStep.EnterSetupCode -> {
-      OnboardingBackDestination(OnboardingStep.SetupCode)
-    }
-
-    OnboardingStep.Manual -> {
-      OnboardingBackDestination(OnboardingStep.Gateway)
-    }
-
-    OnboardingStep.Recovery -> {
-      when (lastGatewayInputSource) {
-        OnboardingGatewayInputSource.SetupScanner -> OnboardingBackDestination(OnboardingStep.SetupCode, inlineQrScannerActive = true)
-
-        OnboardingGatewayInputSource.SetupGallery,
-        OnboardingGatewayInputSource.SetupEntry,
-        -> OnboardingBackDestination(OnboardingStep.SetupCode)
-
-        OnboardingGatewayInputSource.Manual -> OnboardingBackDestination(OnboardingStep.Manual)
-      }
-    }
-
-    OnboardingStep.NodeApproval -> {
-      OnboardingBackDestination(accessStage.nodeApprovalBackStep)
-    }
-
-    OnboardingStep.Permissions -> {
-      OnboardingBackDestination(accessStage.permissionsBackStep)
-    }
-  }
 
 internal fun onboardingBackStateAfterBack(
   step: OnboardingStep,
   lastGatewayInputSource: OnboardingGatewayInputSource = OnboardingGatewayInputSource.SetupScanner,
   setupCodeEntryOpenedFromScanner: Boolean = false,
   accessStage: OnboardingAccessStage = OnboardingAccessStage.InitialApproval,
-): OnboardingBackState? {
-  if (step == OnboardingStep.EnterSetupCode) {
-    return OnboardingBackState(
-      step = OnboardingStep.SetupCode,
-      inlineQrScannerActive = setupCodeEntryOpenedFromScanner,
-    )
+): OnboardingBackState? =
+  when (step) {
+    OnboardingStep.Welcome -> {
+      null
+    }
+
+    OnboardingStep.Gateway -> {
+      OnboardingBackState(OnboardingStep.Welcome)
+    }
+
+    OnboardingStep.SetupCode,
+    OnboardingStep.Manual,
+    -> {
+      OnboardingBackState(OnboardingStep.Gateway)
+    }
+
+    OnboardingStep.EnterSetupCode -> {
+      OnboardingBackState(OnboardingStep.SetupCode, inlineQrScannerActive = setupCodeEntryOpenedFromScanner)
+    }
+
+    OnboardingStep.Recovery -> {
+      when (lastGatewayInputSource) {
+        OnboardingGatewayInputSource.SetupScanner -> OnboardingBackState(OnboardingStep.SetupCode, inlineQrScannerActive = true)
+
+        OnboardingGatewayInputSource.SetupGallery,
+        OnboardingGatewayInputSource.SetupEntry,
+        -> OnboardingBackState(OnboardingStep.SetupCode)
+
+        OnboardingGatewayInputSource.Manual -> OnboardingBackState(OnboardingStep.Manual)
+      }
+    }
+
+    OnboardingStep.NodeApproval -> {
+      OnboardingBackState(accessStage.nodeApprovalBackStep)
+    }
+
+    OnboardingStep.Permissions -> {
+      OnboardingBackState(accessStage.permissionsBackStep)
+    }
   }
-  val destination =
-    onboardingBackDestination(
-      step = step,
-      lastGatewayInputSource = lastGatewayInputSource,
-      accessStage = accessStage,
-    ) ?: return null
-  return OnboardingBackState(step = destination.step, inlineQrScannerActive = destination.inlineQrScannerActive)
-}
 
 /** First-run Android onboarding flow for gateway pairing and permission setup. */
 @Composable
@@ -549,13 +521,13 @@ fun OnboardingFlow(
           accessStage = accessStage,
         ) ?: return
       inlineQrScannerActive = next.inlineQrScannerActive
-      setupCodeEntryOpenedFromScanner = next.setupCodeEntryOpenedFromScanner
+      setupCodeEntryOpenedFromScanner = false
       step = next.step
     }
 
     BackHandler(
       enabled =
-        onboardingBackDestination(
+        onboardingBackStateAfterBack(
           step = step,
           lastGatewayInputSource = lastGatewayInputSource,
           accessStage = accessStage,
@@ -1531,7 +1503,7 @@ internal fun SetupQrScanner(
               Icon(imageVector = Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(28.dp))
             }
           }
-          Text(text = nativeString("Scan QR code"), style = ClawTheme.type.title.copy(fontSize = 20.sp, lineHeight = 25.sp), color = ClawTheme.colors.text, textAlign = TextAlign.Center)
+          Text(text = nativeString("Scan QR code"), style = ClawTheme.type.title.copy(lineHeight = 25.sp), color = ClawTheme.colors.text, textAlign = TextAlign.Center)
           Text(
             text = nativeString("Open the camera and frame the code from openclaw qr."),
             style = ClawTheme.type.caption,
@@ -2660,12 +2632,12 @@ private fun PermissionRow(row: PermissionRowModel) {
       Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
           text = row.title.resolveNativeTextResource(),
-          style = ClawTheme.type.title.copy(fontSize = 18.sp, lineHeight = 23.sp),
+          style = ClawTheme.type.title.copy(fontSize = ClawTheme.type.section.fontSize, lineHeight = 23.sp),
           color = ClawTheme.colors.text,
         )
         Text(
           text = row.subtitle.resolveNativeTextResource(),
-          style = ClawTheme.type.body,
+          style = ClawTheme.type.body.copy(fontSize = ClawTheme.type.caption.fontSize),
           color = ClawTheme.colors.textMuted,
         )
       }
@@ -2695,10 +2667,6 @@ internal enum class GatewayRecoveryUiState(
   ApprovalRequired(
     title = nativeText("Pairing Gateway"),
     message = nativeText("Approve this phone on the gateway.\nThen retry the connection."),
-  ),
-  NodeCapabilityApprovalPending(
-    title = nativeText("Node Approval Pending"),
-    message = nativeText("Gateway pairing worked.\nApprove this phone's node capabilities from an operator UI."),
   ),
   Pairing(
     title = nativeText("Pairing Gateway"),
@@ -2751,7 +2719,6 @@ internal fun gatewayRecoveryPrimaryAction(
       GatewayRecoveryPrimaryAction.Retry
     }
 
-    GatewayRecoveryUiState.NodeCapabilityApprovalPending,
     GatewayRecoveryUiState.Pairing,
     GatewayRecoveryUiState.Finishing,
     -> {
@@ -2836,10 +2803,6 @@ internal fun gatewayRecoveryProgressItems(
         GatewayRecoveryProgressItem(nativeText("Gateway needs device approval"), GatewayRecoveryProgressStatus.Current),
         GatewayRecoveryProgressItem(nativeText("Run the approval command on the Gateway"), GatewayRecoveryProgressStatus.Pending),
       )
-    }
-
-    GatewayRecoveryUiState.NodeCapabilityApprovalPending -> {
-      emptyList()
     }
 
     GatewayRecoveryUiState.Connected,
@@ -3260,7 +3223,9 @@ private fun rememberPermissionState(
       )
   val callLogAvailable = SensitiveFeatureConfig.callLogEnabled
   var motionGranted by rememberSaveable { mutableStateOf(!motionAvailable || hasPermission(context, Manifest.permission.ACTIVITY_RECOGNITION)) }
-  var smsGranted by rememberSaveable { mutableStateOf(currentSmsGranted) }
+  var smsReadGranted by rememberSaveable { mutableStateOf(hasPermission(context, Manifest.permission.READ_SMS)) }
+  var smsSendGranted by rememberSaveable { mutableStateOf(hasPermission(context, Manifest.permission.SEND_SMS)) }
+  val smsGranted = !smsAvailable || (smsReadGranted && smsSendGranted)
   var callLogGranted by rememberSaveable { mutableStateOf(!callLogAvailable || hasPermission(context, Manifest.permission.READ_CALL_LOG)) }
   val lifecycleOwner = LocalLifecycleOwner.current
   val requestScope = rememberCoroutineScope()
@@ -3281,7 +3246,8 @@ private fun rememberPermissionState(
           notificationsGranted = Build.VERSION.SDK_INT < 33 || hasPermission(context, Manifest.permission.POST_NOTIFICATIONS)
           notificationListenerGranted = DeviceNotificationListenerService.isAccessEnabled(context)
           motionGranted = !motionAvailable || hasPermission(context, Manifest.permission.ACTIVITY_RECOGNITION)
-          smsGranted = !smsAvailable || (hasPermission(context, Manifest.permission.SEND_SMS) && hasPermission(context, Manifest.permission.READ_SMS))
+          smsReadGranted = hasPermission(context, Manifest.permission.READ_SMS)
+          smsSendGranted = hasPermission(context, Manifest.permission.SEND_SMS)
           callLogGranted = !callLogAvailable || hasPermission(context, Manifest.permission.READ_CALL_LOG)
         }
       }
@@ -3319,13 +3285,8 @@ private fun rememberPermissionState(
           true
         }
       motionGranted = permissions[Manifest.permission.ACTIVITY_RECOGNITION] ?: motionGranted
-      smsGranted =
-        !smsAvailable ||
-        mergedRequiredPermissionGrantState(
-          permissions = permissions,
-          requiredPermissions = listOf(Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS),
-          currentlyGranted = { permission -> hasPermission(context, permission) },
-        )
+      smsReadGranted = permissions[Manifest.permission.READ_SMS] ?: hasPermission(context, Manifest.permission.READ_SMS)
+      smsSendGranted = permissions[Manifest.permission.SEND_SMS] ?: hasPermission(context, Manifest.permission.SEND_SMS)
       callLogGranted = permissions[Manifest.permission.READ_CALL_LOG] ?: callLogGranted
       requestScope.launch { requester.showSettingsForPermanentDenials(permissions) }
     }
@@ -3406,7 +3367,18 @@ private fun rememberPermissionState(
         null
       },
       if (smsAvailable) {
-        PermissionRowModel(PermissionRowId.Sms, nativeText("SMS"), nativeText("Device access; Gateway opt-in still required"), Icons.Default.Notifications, smsGranted) {
+        PermissionRowModel(
+          PermissionRowId.Sms,
+          nativeText("SMS"),
+          when {
+            smsReadGranted && !smsSendGranted -> nativeText("Read allowed; send not granted. Gateway opt-in still required.")
+            smsSendGranted && !smsReadGranted -> nativeText("Send allowed; read not granted. Gateway opt-in still required.")
+            else -> nativeText("Device access; Gateway opt-in still required")
+          },
+          Icons.Default.Notifications,
+          smsGranted,
+          if (smsReadGranted != smsSendGranted) nativeText("Partial") else permissionRowStatusText(smsGranted),
+        ) {
           request(Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS)
         }
       } else {

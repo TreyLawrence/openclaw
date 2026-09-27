@@ -9,6 +9,7 @@ import * as stateWorker from "../../state/openclaw-state-worker-store.js";
 import * as checkoutInspection from "./checkout-inspection.js";
 import { requireGit } from "./git.js";
 import * as registry from "./registry.js";
+import { admitWorktreeRunLeaseInDatabase } from "./run-lease-store.kernel.js";
 import { resolveRepository } from "./service-preparation.js";
 import { IDLE_GC_MS, ManagedWorktreeService } from "./service.js";
 import {
@@ -26,7 +27,7 @@ const tempDirs = useAutoCleanupTempDirTracker((cleanup) => {
   });
 });
 
-it("does not reinspect unchanged protected and broken checkouts on hourly sweeps", async () => {
+it("bounds cold cleanup inventories and retains dispositions across registry reopen", async () => {
   const root = tempDirs.make("openclaw-gc-spawns-");
   const repo = await initializeManagedWorktreeTestRepository(root);
   const stateDir = path.join(root, "state");
@@ -70,6 +71,10 @@ it("does not reinspect unchanged protected and broken checkouts on hourly sweeps
   const buffered = vi.spyOn(gitExec, "executeGitCommandBuffered");
   const measurements = [];
   for (let pass = 0; pass < 2; pass++) {
+    if (pass > 0) {
+      await stateDatabase.closeOpenClawStateDatabaseAsync();
+      stateDatabase.closeOpenClawStateDatabaseForTest();
+    }
     text.mockClear();
     bytes.mockClear();
     buffered.mockClear();
@@ -90,6 +95,7 @@ it("does not reinspect unchanged protected and broken checkouts on hourly sweeps
     }
   }
   console.log(JSON.stringify({ records: records.length, measurements }));
+  expect(measurements[0]!.gitSpawns).toBeLessThanOrEqual(50);
   expect(measurements[1]!.gitSpawns).toBe(0);
   expect(
     records
@@ -144,13 +150,17 @@ function addLeasedWorktree(env: NodeJS.ProcessEnv, root: string, id: string) {
     createdAt: 1,
     lastActiveAt: 1,
   });
-  registry.admitWorktreeRunLeaseRow(env, {
-    worktreeId: id,
-    token: id,
-    pid: process.pid,
-    startTime: null,
-    now: 1,
-  });
+  stateDatabase.runOpenClawStateWriteTransaction(
+    ({ db }) =>
+      admitWorktreeRunLeaseInDatabase(db, {
+        worktreeId: id,
+        token: id,
+        pid: process.pid,
+        startTime: null,
+        now: 1,
+      }),
+    { env },
+  );
 }
 
 it("protects a sweep of live leases without writer admission or checkout inspection", async () => {
@@ -169,6 +179,7 @@ it("protects a sweep of live leases without writer admission or checkout inspect
   const inspections = vi.spyOn(checkoutInspection, "inspectManagedWorktreeCheckout");
   // Warm the retained reader before measuring steady-state cleanup.
   await new ManagedWorktreeService({ env, now: () => IDLE_GC_MS + 2 }).gc({ limits: {} });
+  expect(inspections).not.toHaveBeenCalled();
   writes.mockClear();
   lists.mockClear();
   reads.mockClear();
