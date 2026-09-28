@@ -48,7 +48,7 @@ describe("per-request MCP headers", () => {
           serverName: "proof",
           resolve: provider,
         });
-        const manager = createSessionMcpRuntimeManager({ enableIdleSweepTimer: false });
+        const manager = createSessionMcpRuntimeManager();
         const params = {
           sessionId: `request-headers-${transport}`,
           sessionKey: "agent:test:request-headers",

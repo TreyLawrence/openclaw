@@ -50,9 +50,7 @@ describe("PR #154043 registration-order proof", () => {
       const singletonStore = globalThis as Record<PropertyKey, unknown>;
       const hadRuntimeManager = Object.hasOwn(singletonStore, SESSION_MCP_RUNTIME_MANAGER_KEY);
       const previousRuntimeManager = singletonStore[SESSION_MCP_RUNTIME_MANAGER_KEY];
-      singletonStore[SESSION_MCP_RUNTIME_MANAGER_KEY] = createSessionMcpRuntimeManager({
-        enableIdleSweepTimer: false,
-      });
+      singletonStore[SESSION_MCP_RUNTIME_MANAGER_KEY] = createSessionMcpRuntimeManager();
       const cfg = { mcp: { servers: DECLARED_SERVERS } } as never;
       const paramsFor = (sessionId: string, requesterSenderId: string | undefined) => ({
         ...makeRequesterParams(sessionId, cfg, requesterSenderId ?? "", { requesterSenderId }),
