@@ -1,7 +1,9 @@
 /** Verifies that MCP connection and request header registrations share one owner. */
 import { describe, expect, it, vi } from "vitest";
+import { partitionMcpServersByConnectionScope } from "../agents/mcp-connection-resolver.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createPluginRegistry } from "./registry.js";
+import { withPluginRuntimeRegistryScope } from "./runtime/gateway-request-scope.js";
 import type { PluginRuntime } from "./runtime/types.js";
 import { createPluginRecord } from "./status.test-fixtures.js";
 
@@ -77,34 +79,48 @@ describe("registerMcpServerRequestHeaderProvider ownership", () => {
   });
 
   it.each(["provider", "resolver"] as const)(
-    "rejects a different plugin's credentials when the %s registered first",
+    "keeps the connection resolver authoritative when the %s registered first",
     (first) => {
       const { registry, apiFor } = createRegistryHarness();
-      const owner = apiFor("plugin-a");
-      const other = apiFor("plugin-b");
+      const providerApi = apiFor("plugin-a");
+      const resolverApi = apiFor("plugin-b");
       const provider = { serverName: "user-mail", resolve: () => ({ traceparent: "owner-trace" }) };
       const resolver = {
         serverName: "user-mail",
         resolve: () => ({ url: "https://mcp.example.test/mail" }),
       };
       if (first === "provider") {
-        owner.registerMcpServerRequestHeaderProvider(provider);
-        other.registerMcpServerConnectionResolver(resolver);
-        expect(registry.mcpServerConnectionResolvers).toEqual([]);
-        expect(registry.mcpServerRequestHeaderProviders).toHaveLength(1);
+        providerApi.registerMcpServerRequestHeaderProvider(provider);
+        resolverApi.registerMcpServerConnectionResolver(resolver);
+        expect(registry.diagnostics).toContainEqual(
+          expect.objectContaining({
+            level: "error",
+            pluginId: "plugin-a",
+            message: expect.stringContaining("displaced"),
+          }),
+        );
       } else {
-        owner.registerMcpServerConnectionResolver(resolver);
-        other.registerMcpServerRequestHeaderProvider(provider);
-        expect(registry.mcpServerRequestHeaderProviders).toEqual([]);
-        expect(registry.mcpServerConnectionResolvers).toHaveLength(1);
+        resolverApi.registerMcpServerConnectionResolver(resolver);
+        providerApi.registerMcpServerRequestHeaderProvider(provider);
+        expect(registry.diagnostics).toContainEqual(
+          expect.objectContaining({
+            level: "error",
+            pluginId: "plugin-a",
+            message: expect.stringContaining('already registered by plugin "plugin-b"'),
+          }),
+        );
       }
-      expect(registry.diagnostics).toContainEqual(
-        expect.objectContaining({
-          level: "error",
-          pluginId: "plugin-b",
-          message: expect.stringContaining('already registered by plugin "plugin-a"'),
+      expect(registry.mcpServerRequestHeaderProviders).toEqual([]);
+      expect(registry.mcpServerConnectionResolvers).toMatchObject([
+        { pluginId: "plugin-b", resolver: { serverName: "user-mail" } },
+      ]);
+      const partition = withPluginRuntimeRegistryScope(registry, () =>
+        partitionMcpServersByConnectionScope({
+          "user-mail": { transport: "streamable-http", url: "https://placeholder.invalid/mcp" },
         }),
       );
+      expect(partition.staticServers).toEqual({});
+      expect(partition.resolverRequesterServerNames).toEqual(["user-mail"]);
     },
   );
 

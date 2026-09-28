@@ -423,9 +423,13 @@ Contract notes:
   optional `agentAccountId` / `messageChannel`). Future trusted fields (for
   example cron/subagent user context) can be added additively.
 - One plugin owns one server name across connection resolvers and request header
-  providers. A registration for the same `serverName` from another plugin is
-  rejected with an error diagnostic (first registration wins). The owner may
-  replace its own registrations.
+  providers, and the connection resolver is authoritative regardless of
+  registration order. A resolver or provider for a `serverName` whose resolver
+  belongs to another plugin is rejected with an error diagnostic. A resolver
+  registered after another plugin's provider displaces that provider (removed,
+  with an error diagnostic on the provider's plugin) so the server stays
+  requester-scoped instead of falling back to its static connection. The owner
+  may replace its own registrations.
 - Tool names are derived from the full declared server set so partial resolution
   never changes safe server names between requesters or turns. Core does not
   verify that different requester endpoints serve identical tool schemas; a
@@ -521,8 +525,10 @@ Contract notes:
   Returning `null` sends no volatile headers; resolution is bounded at 10 seconds.
   A provider failure fails the request
   without exposing its error or falling back to another turn.
-- Providers share server ownership with connection resolvers. Only the owning
-  plugin may register or replace either seam for a server name.
+- Providers share server ownership with connection resolvers, and the resolver
+  wins in either registration order: a foreign provider is rejected after the
+  resolver and displaced by it when registered first. Only the owning plugin may
+  register or replace either seam for a server name.
 - The catalog and transport remain reusable across turn-header changes. Genuine
   config changes, resolver credential rotation, `tools/list_changed`, and
   transport-close recovery retain their existing invalidation behavior.

@@ -244,13 +244,14 @@ export function createNetworkRegistrars(state: PluginRegistryState) {
     serverName: string,
     kind: "connection resolver" | "request header provider",
   ) => {
-    const owner =
-      registry.mcpServerConnectionResolvers.find(
-        (entry) => entry.resolver.serverName === serverName,
-      ) ??
-      registry.mcpServerRequestHeaderProviders.find(
-        (entry) => entry.provider.serverName === serverName,
-      );
+    const resolverOwner = registry.mcpServerConnectionResolvers.find(
+      (entry) => entry.resolver.serverName === serverName,
+    );
+    const providerIndex = registry.mcpServerRequestHeaderProviders.findIndex(
+      (entry) => entry.provider.serverName === serverName,
+    );
+    const providerOwner = registry.mcpServerRequestHeaderProviders[providerIndex];
+    const owner = resolverOwner ?? (kind === "request header provider" ? providerOwner : undefined);
     if (owner && owner.pluginId !== record.id) {
       // Both seams share ownership: another plugin must not attach credentials
       // to an existing owner's endpoint or redirect an existing owner's headers.
@@ -259,6 +260,15 @@ export function createNetworkRegistrars(state: PluginRegistryState) {
         `MCP server ${kind} for "${serverName}" rejected: already registered by plugin "${owner.pluginId}"`,
       );
       return true;
+    }
+    if (providerOwner && providerOwner.pluginId !== record.id) {
+      // The connection resolver owns requester admission regardless of registration
+      // order; a foreign provider registered first must not demote the server to static.
+      registry.mcpServerRequestHeaderProviders.splice(providerIndex, 1);
+      reportRegistrationError(
+        registry.plugins.find((plugin) => plugin.id === providerOwner.pluginId) ?? record,
+        `MCP server request header provider for "${serverName}" displaced: connection resolver registered by plugin "${record.id}" owns requester admission`,
+      );
     }
     return false;
   };
