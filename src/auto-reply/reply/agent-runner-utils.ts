@@ -67,7 +67,8 @@ export function resolveQueuedReplyRuntimeConfig(config: OpenClawConfig): OpenCla
       inputConfig: config,
       runtimeConfig: getRuntimeConfigSnapshot(),
       runtimeSourceConfig: getRuntimeConfigSourceSnapshot(),
-    }) ?? config
+    }) ??
+    config
   );
 }
 
