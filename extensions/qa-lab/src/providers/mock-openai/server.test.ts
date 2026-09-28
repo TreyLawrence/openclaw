@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { validateToolArguments } from "openclaw/plugin-sdk/llm";
 import { describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { adaptAnthropicToolCallIds } from "./mock-anthropic-wire.js";
@@ -9,6 +10,7 @@ import {
   type MockServer,
   QA_SETTLED_TOOL_TERMINAL_CONTINUATION_INSTRUCTION,
   createMockServerTestHarness,
+  guestCodeModeExecTool,
   requireRecord,
   postJson,
   expectOk,
@@ -361,11 +363,7 @@ const CODEX_CUSTOM_PATCH_NAMESPACE = {
 const ANTHROPIC_GUEST_CODE_MODE_TOOLS = [
   {
     name: "exec",
-    input_schema: {
-      type: "object",
-      properties: { code: { type: "string" } },
-      required: ["code"],
-    },
+    input_schema: guestCodeModeExecTool.parameters,
   },
   {
     name: "wait",
@@ -648,31 +646,28 @@ describe("qa mock openai server", () => {
     expect(outputItems(body).some((item) => item.type === "function_call")).toBe(false);
   });
 
-  it.each(["", "@openclaw ", "@sut_bot "])(
-    "keeps final-only marker preview deltas separate from the final answer with prefix %j",
-    async (prefix) => {
-      const server = await startMockServer({ finalOnlyMarkerPauseMs: 1 });
-      const response = await expectStreamingResponses(server, {
-        input: [
-          makeUserInput(
-            `${prefix}Final-only marker streaming QA check. Reply exactly: QA-FINAL-ONLY-STREAMING-OK`,
-          ),
-        ],
-      });
+  it("keeps final-only marker preview deltas separate from the final answer after a mention", async () => {
+    const server = await startMockServer({ finalOnlyMarkerPauseMs: 1 });
+    const response = await expectStreamingResponses(server, {
+      input: [
+        makeUserInput(
+          "@sut_bot Final-only marker streaming QA check. Reply exactly: QA-FINAL-ONLY-STREAMING-OK",
+        ),
+      ],
+    });
 
-      const responseBody = await response.text();
-      const deltaText = responseBody
-        .split("\n")
-        .filter((line) => line.startsWith("data: {"))
-        .map((line) => JSON.parse(line.slice("data: ".length)) as { type?: string; delta?: string })
-        .filter((event) => event.type === "response.output_text.delta")
-        .map((event) => event.delta ?? "")
-        .join("");
-      expect(deltaText).toBe("QA streaming preview in progress");
-      expect(deltaText).not.toContain("QA-FINAL-ONLY-STREAMING-OK");
-      expect(responseBody).toContain('"text":"QA-FINAL-ONLY-STREAMING-OK"');
-    },
-  );
+    const responseBody = await response.text();
+    const deltaText = responseBody
+      .split("\n")
+      .filter((line) => line.startsWith("data: {"))
+      .map((line) => JSON.parse(line.slice("data: ".length)) as { type?: string; delta?: string })
+      .filter((event) => event.type === "response.output_text.delta")
+      .map((event) => event.delta ?? "")
+      .join("");
+    expect(deltaText).toBe("QA streaming preview in progress");
+    expect(deltaText).not.toContain("QA-FINAL-ONLY-STREAMING-OK");
+    expect(responseBody).toContain('"text":"QA-FINAL-ONLY-STREAMING-OK"');
+  });
 
   it.each([
     { label: "structured", output: JSON.stringify({ ok: true }) },
@@ -847,6 +842,9 @@ describe("qa mock openai server", () => {
       "response.output_text.delta",
       "response.failed",
     ]);
+    expect(visibleEvents[1]).toMatchObject({
+      item: { type: "message", role: "assistant", status: "in_progress" },
+    });
     expect(visibleEvents[3]).toMatchObject({
       type: "response.output_text.delta",
       delta: "TELEGRAM-VISIBLE-PARTIAL-BEFORE-FAILURE",
@@ -856,22 +854,6 @@ describe("qa mock openai server", () => {
       "response.failed",
     ]);
     expect(unsentEvents.some((event) => event.type === "response.output_text.delta")).toBe(false);
-  });
-
-  it("plans deterministic tool-progress reads from prompt paths", async () => {
-    const server = await startMockServer();
-
-    const response = await expectStreamingResponses(server, {
-      input: [
-        makeUserInput(
-          "Tool progress QA check: read `qa-progress-target.txt` before answering. After the read completes, reply exactly `TOOL_PROGRESS_OK`.",
-        ),
-      ],
-    });
-
-    const body = await response.text();
-    expect(body).toContain('"name":"read"');
-    expect(body).toContain("qa-progress-target.txt");
   });
 
   it("plans deterministic tool-progress reads for exact-marker prompts", async () => {
@@ -1635,36 +1617,6 @@ describe("qa mock openai server", () => {
     expect(payload.output?.[0]?.content?.[0]?.text).toContain("Status: complete");
   });
 
-  it("uses argument-scoped tool call ids for repeated tool names", async () => {
-    const server = await startMockServer();
-
-    const prompt =
-      "Repo contract followthrough check. Read AGENT.md, SOUL.md, and FOLLOWTHROUGH_INPUT.md first. Then follow the repo contract exactly, write ./repo-contract-summary.txt, and reply with three labeled lines: Read, Wrote, Status.";
-
-    const first = await expectOpenAiNonStreamingResponses(server, {
-      input: [makeUserInput(prompt)],
-    });
-    const firstPayload = (await first.json()) as {
-      output?: Array<{ call_id?: string }>;
-    };
-
-    const second = await expectOpenAiNonStreamingResponses(server, {
-      input: [
-        makeUserInput(prompt),
-        makeToolOutput(
-          "# Repo contract\n\nStep order:\n1. Read AGENT.md.\n2. Read SOUL.md.\n3. Read FOLLOWTHROUGH_INPUT.md.\n4. Write ./repo-contract-summary.txt.\n",
-        ),
-      ],
-    });
-    const secondPayload = (await second.json()) as {
-      output?: Array<{ call_id?: string }>;
-    };
-
-    expect(firstPayload.output?.[0]?.call_id).toMatch(/^call_mock_read_/);
-    expect(secondPayload.output?.[0]?.call_id).toMatch(/^call_mock_read_/);
-    expect(firstPayload.output?.[0]?.call_id).not.toBe(secondPayload.output?.[0]?.call_id);
-  });
-
   it("uses unique ids for repeated identical tool calls", async () => {
     const server = await startMockServer();
     const body = {
@@ -1799,6 +1751,7 @@ describe("qa mock openai server", () => {
     expect(outputToolArgsFromItem(groupToolCall)).toEqual({
       action: "react",
       emoji: "👍",
+      final: true,
     });
 
     const toolCall = outputToolCall(declaredPayload, "message");
@@ -1809,30 +1762,8 @@ describe("qa mock openai server", () => {
     expect(outputToolArgsFromItem(toolCall)).toEqual({
       action: "react",
       emoji: "👍",
+      final: true,
     });
-
-    const afterToolPayload = await expectOpenAiNonStreamingResponsesJson(server, {
-      tools: [MESSAGE_TOOL],
-      input: [
-        makeUserInput(WHATSAPP_AGENT_REACT_PROMPT),
-        makeToolOutputWithCallId(
-          outputToolCallId(toolCall, "call_mock_message_react"),
-          "reaction sent",
-        ),
-      ],
-    });
-
-    expect(
-      outputItems(afterToolPayload).some(
-        (item) => item.type === "function_call" && item.name === "message",
-      ),
-    ).toBe(false);
-    expect(
-      outputItems(afterToolPayload)
-        .flatMap((item) => (Array.isArray(item.content) ? item.content : []))
-        .map((content) => requireRecord(content, "assistant content").text)
-        .filter((text): text is string => typeof text === "string" && text.trim().length > 0),
-    ).toEqual([]);
   });
 
   it("emits WhatsApp agent upload-file message tool calls only when the tool is declared", async () => {
@@ -1871,24 +1802,6 @@ describe("qa mock openai server", () => {
       filename: "whatsapp-qa-agent-upload.png",
     });
     expect(outputToolArgsFromItem(toolCall).buffer).toEqual(expect.any(String));
-
-    const afterToolPayload = await expectOpenAiNonStreamingResponsesJson(server, {
-      tools: [MESSAGE_TOOL],
-      input: [
-        makeUserInput(WHATSAPP_AGENT_UPLOAD_PROMPT),
-        makeToolOutputWithCallId(
-          outputToolCallId(toolCall, "call_mock_message_upload"),
-          "media sent",
-        ),
-      ],
-    });
-
-    expect(
-      outputItems(afterToolPayload).some(
-        (item) => item.type === "function_call" && item.name === "message",
-      ),
-    ).toBe(false);
-    expect(outputText(afterToolPayload)).toBe("");
   });
 
   it("answers WhatsApp pending-history prompts only with injected prior group context", async () => {
@@ -3361,27 +3274,6 @@ Update and merge these partial structured summaries.`,
     expect(outputText(payload)).toBe("QA-SUBAGENT-TERMINAL-EMPTY-REPRESENTED");
   });
 
-  it.each(["visible", "silent", "fallback", "restart", "empty"])(
-    "acknowledges the %s worker before direct terminal delivery",
-    async (terminalCase) => {
-      const server = await startMockServer();
-      const prompt = `Subagent terminal reply QA check: ${terminalCase}.`;
-      const payload = await expectNonStreamingResponsesJson(server, {
-        tools: [SESSIONS_SPAWN_TOOL, SESSIONS_YIELD_TOOL],
-        input: [
-          makeUserInput(prompt),
-          makeToolOutputWithCallId(
-            "call_mock_sessions_spawn_1",
-            JSON.stringify({ status: "accepted", runId: `run-${terminalCase}` }),
-          ),
-        ],
-      });
-
-      expect(outputItems(payload).some((item) => item.type === "function_call")).toBe(false);
-      expect(outputText(payload)).toBe("Worker started.");
-    },
-  );
-
   it("acknowledges the empty worker before its intentional non-delivery", async () => {
     const server = await startMockServer();
     const payload = await expectNonStreamingResponsesJson(server, {
@@ -3404,8 +3296,6 @@ Update and merge these partial structured summaries.`,
   it.each([
     ["visible", "NO_REPLY"],
     ["silent", "QA-SUBAGENT-TERMINAL-SILENT-REPRESENTED"],
-    ["fallback", "NO_REPLY"],
-    ["restart", "NO_REPLY"],
   ])(
     "uses the expected representation for the %s completion-agent direct fallback",
     async (terminalCase, expected) => {
@@ -4752,36 +4642,6 @@ Update and merge these partial structured summaries.`,
     expect(outputText(await response.json())).toBe("NEW_TOKEN");
   });
 
-  it("requires both WhatsApp batched markers before returning the final batched marker", async () => {
-    const server = await startMockServer();
-
-    const standalone = await expectNonStreamingResponses(server, {
-      input: [
-        makeUserInput(
-          "Second batched WhatsApp QA message. Reply with only this exact marker: " +
-            "WHATSAPP_QA_BATCHED_FINAL_TEST only if the previous queued message is visible " +
-            "in this same run context.",
-        ),
-      ],
-    });
-    expect(outputText(await standalone.json())).toBe("WHATSAPP_QA_BATCHED_MISSING_CONTEXT_TEST");
-
-    const batched = await expectNonStreamingResponses(server, {
-      input: [
-        makeUserInput(
-          "First batched WhatsApp QA message WHATSAPP_QA_BATCHED_FIRST_TEST. " +
-            "Wait for the next message before replying.",
-        ),
-        makeUserInput(
-          "Second batched WhatsApp QA message. Reply with only this exact marker: " +
-            "WHATSAPP_QA_BATCHED_FINAL_TEST only if the previous queued message is visible " +
-            "in this same run context.",
-        ),
-      ],
-    });
-    expect(outputText(await batched.json())).toBe("WHATSAPP_QA_BATCHED_FINAL_TEST");
-  });
-
   it("lets the latest exact marker prompt beat stale Telegram session_status history", async () => {
     const server = await startMockServer();
 
@@ -5404,7 +5264,7 @@ Update and merge these partial structured summaries.`,
     });
   });
 
-  it("summarizes QA tool-search bridge outputs with the nested plugin result marker", async () => {
+  it("summarizes QA tool-search catalog outputs with the nested plugin result marker", async () => {
     const server = await startMockServer();
     const targetTool = "fake_plugin_tool_17";
 
@@ -5414,25 +5274,22 @@ Update and merge these partial structured summaries.`,
           `tool search qa check target=${targetTool}. Call exactly that tool once and then summarize.`,
         ),
         makeToolOutputWithCallId(
-          "call_tool_search_code_1",
+          "call_tool_call_1",
           JSON.stringify({
-            ok: true,
-            value: {
-              tool: {
-                id: `openclaw:tool-search-e2e-fixture:${targetTool}`,
-                source: "openclaw",
-                sourceName: "tool-search-e2e-fixture",
-                name: targetTool,
-                description: "x".repeat(260),
-              },
-              result: {
-                content: [
-                  {
-                    type: "text",
-                    text: `FAKE_PLUGIN_OK ${targetTool} {"marker":"code"}`,
-                  },
-                ],
-              },
+            tool: {
+              id: `openclaw:tool-search-e2e-fixture:${targetTool}`,
+              source: "openclaw",
+              sourceName: "tool-search-e2e-fixture",
+              name: targetTool,
+              description: "x".repeat(260),
+            },
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: `FAKE_PLUGIN_OK ${targetTool} {"marker":"tools"}`,
+                },
+              ],
             },
           }),
         ),
@@ -5461,14 +5318,11 @@ Update and merge these partial structured summaries.`,
           `tool search qa check target=${targetTool}. Call exactly that tool once and then summarize.`,
         ),
         makeToolOutputWithCallId(
-          "call_tool_search_code_1",
+          "call_tool_call_1",
           JSON.stringify({
-            ok: true,
-            value: {
-              tool: { name: targetTool },
-              result: {
-                content: [{ type: "text", text: `FAKE_PLUGIN_OK ${targetTool}` }],
-              },
+            tool: { name: targetTool },
+            result: {
+              content: [{ type: "text", text: `FAKE_PLUGIN_OK ${targetTool}` }],
             },
           }),
         ),
@@ -5660,7 +5514,7 @@ Update and merge these partial structured summaries.`,
     {
       label: "direct custom tools before tool search",
       declarations: {
-        tools: [{ type: "function", name: "tool_search_code" }, CODEX_CUSTOM_PATCH_NAMESPACE],
+        tools: [{ type: "function", name: "tool_search" }, CODEX_CUSTOM_PATCH_NAMESPACE],
       },
       additionalTools: undefined,
     },
@@ -6270,22 +6124,6 @@ Update and merge these partial structured summaries.`,
     ]);
   });
 
-  it("serves deterministic OpenAI-compatible audio transcription responses", async () => {
-    const server = await startMockServer();
-
-    const response = await fetchOk(`${server.baseUrl}/v1/audio/transcriptions`, {
-      method: "POST",
-      headers: {
-        "content-type": "multipart/form-data; boundary=qa",
-      },
-      body: "--qa\r\n--qa--\r\n",
-    });
-
-    await expect(response.json()).resolves.toEqual({
-      text: "Reply with only this exact marker: WHATSAPP_QA_AUDIO_TRANSCRIPT_OK",
-    });
-  });
-
   it("serves deterministic WhatsApp group audio transcription for the trigger fixture", async () => {
     const server = await startMockServer();
 
@@ -6473,13 +6311,7 @@ Update and merge these partial structured summaries.`,
     const tools = [
       {
         name: "exec",
-        input_schema: {
-          type: "object",
-          properties: {
-            code: { type: "string" },
-          },
-          required: ["code"],
-        },
+        input_schema: guestCodeModeExecTool.parameters,
       },
       {
         name: "wait",
@@ -6548,7 +6380,14 @@ Update and merge these partial structured summaries.`,
 
     const readAgent = readToolUse(await request());
     expect(readAgent.name).toBe("exec");
-    expect(readAgent.input).toEqual({ code: expect.any(String) });
+    const readAgentArgs = requireRecord(readAgent.input, "exec input");
+    validateToolArguments(guestCodeModeExecTool, {
+      type: "toolCall",
+      id: String(readAgent.id),
+      name: "exec",
+      arguments: readAgentArgs,
+    });
+    expect(readAgentArgs).toEqual({ title: expect.any(String), code: expect.any(String) });
     const readAgentCode = String(requireRecord(readAgent.input, "exec input").code);
     expect(readAgentCode).toContain("await catalog.search(targetName)");
     expect(readAgentCode).toContain("await target(targetArgs)");

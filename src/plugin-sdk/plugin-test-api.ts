@@ -66,7 +66,6 @@ export function createTestPluginApi(api: TestPluginApiInput = {}): OpenClawPlugi
     registerAgentHarness() {},
     registerCodexAppServerExtensionFactory() {},
     registerAgentToolResultMiddleware() {},
-    registerDetachedTaskRuntime() {},
     registerSessionExtension() {},
     enqueueNextTurnInjection: async (injection) => ({
       enqueued: false,

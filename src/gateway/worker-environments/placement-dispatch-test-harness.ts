@@ -21,6 +21,7 @@ import { createWorkerPlacementDispatchService } from "./placement-dispatch.js";
 import { createWorkerPlacementRunnerAvailabilityReader } from "./placement-projector.js";
 import { completeReclaimedWorkspaceTeardown } from "./placement-teardown.js";
 import {
+  createPlacementTurnClaimFixtureOps,
   seedAttachedPlacementEnvironment,
   writePlacementEnvironmentFixture,
 } from "./placement-test-fixtures.js";
@@ -43,9 +44,13 @@ import {
   type WorkerWorkspaceRecoveryFailureReport,
 } from "./workspace-recovery.test-support.js";
 
-const runReclaimPreparation: Parameters<
-  typeof createWorkerPlacementDispatchService
->[0]["runReclaimPreparation"] = async ({ run, authorize, pendingOperations }) => {
+type DispatchOptions = Parameters<typeof createWorkerPlacementDispatchService>[0];
+
+const runReclaimPreparation: DispatchOptions["runReclaimPreparation"] = async ({
+  run,
+  authorize,
+  pendingOperations,
+}) => {
   await pendingOperations?.settled;
   return await run(authorize);
 };
@@ -55,18 +60,10 @@ export function createHarness(
   placementStore: PlacementStore,
   options: {
     environmentService?: WorkerEnvironmentService;
-    runReclaimPreparation?: Parameters<
-      typeof createWorkerPlacementDispatchService
-    >[0]["runReclaimPreparation"];
-    runReclaimBarrier?: Parameters<
-      typeof createWorkerPlacementDispatchService
-    >[0]["runReclaimBarrier"];
-    runFailedReclaimBarrier?: Parameters<
-      typeof createWorkerPlacementDispatchService
-    >[0]["runFailedReclaimBarrier"];
-    prepareGatewayMove?: Parameters<
-      typeof createWorkerPlacementDispatchService
-    >[0]["prepareGatewayMove"];
+    runReclaimPreparation?: DispatchOptions["runReclaimPreparation"];
+    runReclaimBarrier?: DispatchOptions["runReclaimBarrier"];
+    runFailedReclaimBarrier?: DispatchOptions["runFailedReclaimBarrier"];
+    prepareGatewayMove?: DispatchOptions["prepareGatewayMove"];
     failAt?: DispatchStage;
     destroyFails?: boolean;
     destroyFailureCount?: number;
@@ -83,12 +80,8 @@ export function createHarness(
     localVerifyFails?: boolean;
     resumeFails?: boolean;
     workspacePath?: string;
-    resolveWorkspace?: Parameters<
-      typeof createWorkerPlacementDispatchService
-    >[0]["resolveWorkspace"];
-    withPreparedRecovery?: Parameters<
-      typeof createWorkerPlacementDispatchService
-    >[0]["withPreparedRecovery"];
+    resolveWorkspace?: DispatchOptions["resolveWorkspace"];
+    withPreparedRecovery?: DispatchOptions["withPreparedRecovery"];
     requiresNodeEnrollment?: boolean;
     priorWorkspaceResultConflict?: { paths: string[]; stagedResultRef: string };
     priorWorkspaceResultConflictLookup?: WorkspaceResultConflictLookup;
@@ -99,24 +92,18 @@ export function createHarness(
     terminalizedReclaimError?: Error;
     environmentGeneration?: number;
     failMoveAfterBegin?: boolean;
-    runMoveBarrier?: Parameters<typeof createWorkerPlacementDispatchService>[0]["runMoveBarrier"];
+    runMoveBarrier?: DispatchOptions["runMoveBarrier"];
     recoveryBarrierError?: Error;
     isShuttingDown?: () => boolean;
-    prepareAcceptedWorkspacePublication?: Parameters<
-      typeof createWorkerPlacementDispatchService
-    >[0]["prepareAcceptedWorkspacePublication"];
-    publishAcceptedWorkspace?: Parameters<
-      typeof createWorkerPlacementDispatchService
-    >[0]["publishAcceptedWorkspace"];
+    prepareAcceptedWorkspacePublication?: DispatchOptions["prepareAcceptedWorkspacePublication"];
+    publishAcceptedWorkspace?: DispatchOptions["publishAcceptedWorkspace"];
     beforeMoveBegin?: (abandoned: { runId: string } | undefined) => Promise<void>;
     afterMoveBegin?: () => void;
     afterDestroy?: () => Promise<void> | void;
     afterReconcile?: () => Promise<void> | void;
     afterStopTunnel?: () => Promise<void> | void;
     deviceRunnerAvailable?: boolean;
-    isCurrentNodePlacement?: Parameters<
-      typeof createWorkerPlacementDispatchService
-    >[0]["isCurrentNodePlacement"];
+    isCurrentNodePlacement?: DispatchOptions["isCurrentNodePlacement"];
   } = {},
 ) {
   const reconciledManifestRef = MANIFEST_REF.replaceAll("b", "c");
@@ -141,14 +128,16 @@ export function createHarness(
   };
   const placements: WorkerDispatchPlacementStore = {
     get: (sessionId) => placementStore.get(sessionId),
+    readProjection: (sessionIds, readOptions) =>
+      placementStore.readProjection(sessionIds, readOptions),
+    readRecoveryCandidates: () => placementStore.readRecoveryCandidates(),
+    readChangeSnapshot: () => placementStore.readChangeSnapshot(),
     loadWorkspaceReconciliation: (owner, loadOptions) =>
       placementStore.loadWorkspaceReconciliation(owner, loadOptions),
     beginWorkspaceReconciliation: (owner, journal) =>
       placementStore.beginWorkspaceReconciliation(owner, journal),
     abortWorkspaceReconciliation: (owner, abortOptions) =>
       placementStore.abortWorkspaceReconciliation(owner, abortOptions),
-    getWorkspaceReconciliationPlacement: (owner) =>
-      placementStore.getWorkspaceReconciliationPlacement(owner),
     listWorkspaceReconciliationOwners: () => placementStore.listWorkspaceReconciliationOwners(),
     listPendingWorkspaceResults: (sessionId) =>
       placementStore.listPendingWorkspaceResults(sessionId),
@@ -179,7 +168,6 @@ export function createHarness(
     },
     completePlacementMoveToWorker: (params) => placementStore.completePlacementMoveToWorker(params),
     getPlacementMove: (sessionId) => placementStore.getPlacementMove(sessionId),
-    listPlacementMoves: () => placementStore.listPlacementMoves(),
     recordPlacementMoveError: (params) => placementStore.recordPlacementMoveError(params),
     markWorkspaceResultPending: (claim) => placementStore.markWorkspaceResultPending(claim),
     acceptWorkspaceResult: (claim) => placementStore.acceptWorkspaceResult(claim),
@@ -198,10 +186,12 @@ export function createHarness(
     },
     abandonWorkspaceResult: (pending) => placementStore.abandonWorkspaceResult(pending),
     releaseTurn: (claim) => placementStore.releaseTurn(claim),
+    retainInterruptedTurnWorkspace: (claim, assertCurrent) =>
+      placementStore.retainInterruptedTurnWorkspace(claim, assertCurrent),
     updateWorkspaceBaseManifest: (params) => placementStore.updateWorkspaceBaseManifest(params),
-    startDispatch: (params) => {
+    startDispatch: (params, dispatchOptions) => {
       log.push("placement:requested");
-      return placementStore.startDispatch(params);
+      return placementStore.startDispatch(params, dispatchOptions);
     },
     bindPreparedEnvironment: (params) => placementStore.bindPreparedEnvironment(params),
     transition: (params) => {
@@ -217,7 +207,7 @@ export function createHarness(
     startDrain: (params) => {
       log.push("placement:draining");
       if (options.claimOnDrain && !placementStore.get(params.sessionId)?.turnClaim) {
-        placementStore.claimTurn({
+        createPlacementTurnClaimFixtureOps(database).claimTurn({
           sessionId: params.sessionId,
           sessionKey: REQUEST.sessionKey,
           agentId: REQUEST.agentId,
@@ -491,7 +481,7 @@ export function createHarness(
         fail("preflight");
       }
       authorize?.();
-      const placement = startDispatch();
+      const placement = await startDispatch();
       if (options.failAt === "barrier") {
         throw new Error("barrier failed");
       }
@@ -616,8 +606,8 @@ export function createHarness(
       seedStarting: () => seedStartingPlacement(placementStore, environmentId),
       seedActive: (ownerEpoch: number, executionMode?: "worker-turn" | "remote-exec") =>
         seedActive(ownerEpoch, executionMode),
-      seedDraining: (ownerEpoch: number) => {
-        const active = seedActive(ownerEpoch);
+      seedDraining: async (ownerEpoch: number) => {
+        const active = await seedActive(ownerEpoch);
         if (active.state !== "active") {
           throw new Error("active placement fixture was not active");
         }
