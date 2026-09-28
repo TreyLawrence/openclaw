@@ -1,7 +1,7 @@
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
+import type { SsrFPolicy } from "openclaw/plugin-sdk/security-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { Browser, Page, Response } from "playwright-core";
-import type { SsrFPolicy } from "../infra/net/ssrf.js";
 import {
   appendCdpPath,
   assertCdpEndpointAllowed,
@@ -59,10 +59,7 @@ import {
   BROWSER_REF_MARKER_ATTRIBUTE,
   readDocumentIdentitiesForPage,
 } from "./pw-session.page-cdp.js";
-import {
-  assertBrowserDashboardTabCanClose,
-  readBrowserDashboardTabs,
-} from "./session-tab-store.js";
+import { dispatchBrowserTabClose, readBrowserDashboardTabs } from "./session-tab-store.js";
 
 export async function getObservedBrowserStateViaPlaywright(opts: {
   cdpUrl: string;
@@ -661,23 +658,41 @@ export async function closePageByTargetIdViaPlaywright(opts: {
   signal?: AbortSignal;
 }): Promise<void> {
   const page = await getPageForTargetId(opts);
+  await closeResolvedPageViaPlaywright(page, opts);
+}
+
+/** Close an already resolved page without bypassing dashboard or connection ownership. */
+export async function closeResolvedPageViaPlaywright(
+  page: Page,
+  opts: {
+    cdpUrl: string;
+    targetId?: string;
+    signal?: AbortSignal;
+    assertCurrent?: () => void | Promise<void>;
+  },
+): Promise<void> {
   opts.signal?.throwIfAborted();
-  if (readBrowserDashboardTabs().length > 0) {
-    const targetId = (await pageTargetInfo(page))?.targetId;
+  let targetId = opts.targetId;
+  if (!targetId && (await readBrowserDashboardTabs()).length > 0) {
+    targetId = (await pageTargetInfo(page))?.targetId;
     opts.signal?.throwIfAborted();
-    if (!targetId) {
-      throw new Error("Cannot verify that this page is not retained by a dashboard");
-    }
-    assertBrowserDashboardTabCanClose(targetId);
   }
-  if (isConnectionScopedPage(page)) {
-    const browser = page.context().browser();
-    if (browser) {
-      await closeConnectionScopedPageBrowser(opts.cdpUrl, browser);
-    }
-  } else {
-    await page.close();
-  }
+  await dispatchBrowserTabClose(
+    targetId,
+    undefined,
+    async () => {
+      opts.signal?.throwIfAborted();
+      if (isConnectionScopedPage(page)) {
+        const browser = page.context().browser();
+        if (browser) {
+          await closeConnectionScopedPageBrowser(opts.cdpUrl, browser);
+        }
+      } else {
+        await page.close();
+      }
+    },
+    { assertCurrent: opts.assertCurrent },
+  );
 }
 
 /**

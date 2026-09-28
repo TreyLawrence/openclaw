@@ -1,4 +1,4 @@
-// Produces redacted runtime config snapshots for diagnostics and UI surfaces.
+import { isDeepStrictEqual } from "node:util";
 import { sha256Base64Url } from "../infra/crypto-digest.js";
 import { clearExecutablePathCache } from "../infra/executable-path.js";
 import { sessionChanges } from "../sessions/session-row-changes.js";
@@ -22,10 +22,8 @@ import {
   type CapturedRuntimeConfigRead,
   getRuntimeConfigCapture,
 } from "./runtime-config-capture-state.js";
-import { configSnapshotsMatch, stableConfigStringify } from "./runtime-config-identity.js";
-import type { OpenClawConfig } from "./types.js";
-
-export { selectApplicableRuntimeConfig } from "./runtime-config-identity.js";
+import { runtimeSessionChangeScope } from "./runtime-session-changes.js";
+import type { ConfigFileSnapshot, OpenClawConfig } from "./types.js";
 
 export type RuntimeConfigSnapshotRefreshOptions = {
   includeAuthStoreRefs?: boolean;
@@ -101,6 +99,7 @@ export type RuntimeConfigSnapshotRefreshHandler = {
 
 export type RuntimeConfigWriteNotification = {
   configPath: string;
+  snapshot: ConfigFileSnapshot;
   sourceConfig: OpenClawConfig;
   runtimeConfig: OpenClawConfig;
   persistedHash: string;
@@ -121,23 +120,6 @@ export type RuntimeConfigWritePreparedCandidate = {
   reapplyRuntimeOverlays?: (config: OpenClawConfig) => OpenClawConfig;
   reapplyCompareOverlays?: (config: OpenClawConfig) => OpenClawConfig;
 };
-
-export function projectRuntimeConfigWritePreparedCandidates(
-  preparedCandidates: ReadonlyMap<symbol, RuntimeConfigWritePreparedCandidate>,
-  runtimeConfig: OpenClawConfig,
-  sourceConfig: OpenClawConfig,
-): Map<symbol, RuntimeConfigWritePreparedCandidate> {
-  return new Map(
-    [...preparedCandidates].map(([ownerId, candidate]) => [
-      ownerId,
-      {
-        ...candidate,
-        runtimeConfig: candidate.reapplyRuntimeOverlays?.(runtimeConfig) ?? candidate.runtimeConfig,
-        compareConfig: candidate.reapplyCompareOverlays?.(sourceConfig) ?? candidate.compareConfig,
-      },
-    ]),
-  );
-}
 
 export type RuntimeConfigSnapshotMetadata = {
   revision: number;
@@ -178,6 +160,39 @@ const runtimeConfigSnapshotPreparers = new Map<
     }
   | undefined
 >();
+
+function stableConfigStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableConfigStringify(entry)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).toSorted();
+  return `{${keys
+    .map((key) => `${JSON.stringify(key)}:${stableConfigStringify(record[key])}`)
+    .join(",")}}`;
+}
+
+function configSnapshotsMatch(left: OpenClawConfig, right: OpenClawConfig): boolean {
+  if (left === right) {
+    return true;
+  }
+  // Fresh reads allocate new facts. Compare their complete provenance, not object identity
+  // or just JSON config bytes: same-byte values can name different authored SecretRefs.
+  if (
+    getConfigResolutionFacts(left) !== getConfigResolutionFacts(right) &&
+    !isDeepStrictEqual(serializeConfigResolutionFacts(left), serializeConfigResolutionFacts(right))
+  ) {
+    return false;
+  }
+  try {
+    return stableConfigStringify(left) === stableConfigStringify(right);
+  } catch {
+    return false;
+  }
+}
 
 // Diagnostic callers stop at their raw revision; this owner accepts config objects.
 // Only immutable identities share hashes across reads.
@@ -222,6 +237,7 @@ export function setRuntimeConfigSnapshot(
 }
 
 function publishRuntimeConfigSnapshot(config: OpenClawConfig, sourceConfig?: OpenClawConfig): void {
+  const scope = runtimeSessionChangeScope(runtimeConfigSnapshot, config);
   runtimeConfigSnapshotGeneration += 1;
   clearExecutablePathCache();
   runtimeConfigSnapshot = config;
@@ -231,7 +247,7 @@ function publishRuntimeConfigSnapshot(config: OpenClawConfig, sourceConfig?: Ope
     publishedRuntimeConfigs.add(sourceConfig);
   }
   runtimeConfigSnapshotMetadata = createRuntimeConfigSnapshotMetadata(config, sourceConfig);
-  sessionChanges.emit({ all: true, scope: "config" });
+  sessionChanges.emit({ all: true, scope });
 }
 
 export function registerRuntimeConfigSnapshotPreparer(
@@ -386,42 +402,29 @@ export function resolveRuntimeConfigCacheKey(config: OpenClawConfig): string {
   return `config:${hashRuntimeConfigValue(config)}`;
 }
 
-export function createRuntimeConfigWriteNotification(params: {
-  configPath: string;
-  sourceConfig: OpenClawConfig;
-  runtimeConfig: OpenClawConfig;
-  persistedHash: string;
-  writtenAtMs?: number;
-  afterWrite?: ConfigWriteAfterWrite;
-  runtimeRefresh?: RuntimeConfigSnapshotRefreshOptions;
-  preparedCandidate?: RuntimeConfigWritePreparedCandidate;
-  preparedCandidatesByOwner?: ReadonlyMap<symbol, RuntimeConfigWritePreparedCandidate>;
-}): RuntimeConfigWriteNotification {
-  const metadata =
-    params.runtimeConfig === runtimeConfigSnapshot && runtimeConfigSnapshotMetadata
-      ? runtimeConfigSnapshotMetadata
-      : {
-          revision: runtimeConfigSnapshotRevision,
-          fingerprint: hashRuntimeConfigValue(params.runtimeConfig),
-          sourceFingerprint: hashRuntimeConfigValue(params.sourceConfig),
-          updatedAtMs: Date.now(),
-        };
-  return {
-    configPath: params.configPath,
-    sourceConfig: params.sourceConfig,
-    runtimeConfig: params.runtimeConfig,
-    persistedHash: params.persistedHash,
-    revision: metadata.revision,
-    fingerprint: metadata.fingerprint,
-    sourceFingerprint: metadata.sourceFingerprint,
-    writtenAtMs: params.writtenAtMs ?? Date.now(),
-    afterWrite: params.afterWrite,
-    ...(params.runtimeRefresh ? { runtimeRefresh: params.runtimeRefresh } : {}),
-    ...(params.preparedCandidate ? { preparedCandidate: params.preparedCandidate } : {}),
-    ...(params.preparedCandidatesByOwner
-      ? { preparedCandidatesByOwner: params.preparedCandidatesByOwner }
-      : {}),
-  };
+export function selectApplicableRuntimeConfig(params: {
+  inputConfig?: OpenClawConfig;
+  runtimeConfig?: OpenClawConfig | null;
+  runtimeSourceConfig?: OpenClawConfig | null;
+}): OpenClawConfig | undefined {
+  const runtimeConfig = params.runtimeConfig ?? null;
+  if (!runtimeConfig) {
+    return params.inputConfig;
+  }
+  const inputConfig = params.inputConfig;
+  if (!inputConfig) {
+    return runtimeConfig;
+  }
+  if (inputConfig === runtimeConfig) {
+    return inputConfig;
+  }
+  const runtimeSourceConfig = params.runtimeSourceConfig ?? null;
+  // A pinned file config is not an activated secrets snapshot. Without its source
+  // contract, replacing an explicit config can discard command-resolved credentials.
+  if (runtimeSourceConfig && configSnapshotsMatch(inputConfig, runtimeSourceConfig)) {
+    return runtimeConfig;
+  }
+  return inputConfig;
 }
 
 /** Bind a retained consumer to its current runtime owner while preserving scoped configs. */

@@ -3,6 +3,7 @@ import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
+import { normalizeOptionalTrimmedStringList } from "@openclaw/normalization-core/string-normalization";
 import { resolveFastModeState } from "../../agents/fast-mode.js";
 import { getPreparedModelRuntimePluginGeneration } from "../../agents/prepared-model-runtime-generation-scope.js";
 import { resolveCandidateThinkingLevel } from "../../agents/thinking-runtime.js";
@@ -32,11 +33,10 @@ import {
   resolveMessageActionTurnCapabilityLifetime,
 } from "../../gateway/message-action-turn-capability.js";
 import { getActiveSecretsRuntimeConfigSnapshot } from "../../secrets/runtime-state.js";
-import { isReasoningTagProvider } from "../../utils/provider-utils.js";
 import type { TemplateContext } from "../templating.js";
 import { resolveRunAuthProfile } from "./agent-runner-auth-profile.js";
 import type { AgentTurnParams } from "./agent-runner-execution.types.js";
-import { buildEmbeddedRunBaseParams as buildEmbeddedRunBaseParamsCore } from "./agent-runner-run-params.js";
+import { buildEmbeddedRunBaseParams } from "./agent-runner-run-params.js";
 import { hasInboundAudio } from "./inbound-media.js";
 import { resolveOriginMessageProvider } from "./origin-routing.js";
 import type { FollowupRun } from "./queue.js";
@@ -57,10 +57,6 @@ type EmbeddedReplyRoute = Pick<
 
 /** Selects the freshest runtime config usable by queued reply execution. */
 export function resolveQueuedReplyRuntimeConfig(config: OpenClawConfig): OpenClawConfig {
-  const runtimeConfig =
-    typeof getRuntimeConfigSnapshot === "function" ? getRuntimeConfigSnapshot() : null;
-  const runtimeSourceConfig =
-    typeof getRuntimeConfigSourceSnapshot === "function" ? getRuntimeConfigSourceSnapshot() : null;
   // An already-admitted turn keeps its retained config paired with its plugin
   // generation lease; rebinding to a newer publication would split them and fail
   // the nested borrow. Queue drains run outside the generation scope and rebind.
@@ -69,10 +65,9 @@ export function resolveQueuedReplyRuntimeConfig(config: OpenClawConfig): OpenCla
     (admittedGeneration ? null : resolvePublishedRuntimeConfig(config)) ??
     selectApplicableRuntimeConfig({
       inputConfig: config,
-      runtimeConfig,
-      runtimeSourceConfig,
-    }) ??
-    config
+      runtimeConfig: getRuntimeConfigSnapshot(),
+      runtimeSourceConfig: getRuntimeConfigSourceSnapshot(),
+    }) ?? config
   );
 }
 
@@ -154,15 +149,8 @@ export function buildThreadingToolContext(params: {
     provider: sessionCtx.Provider,
   });
   const originTo = sessionCtx.OriginatingTo ?? sessionCtx.To;
-  if (!config) {
-    return {
-      currentMessageId,
-      currentSourceTurnId,
-      replyToMode: sessionCtx.ReplyToMode,
-    };
-  }
-  const rawProvider = normalizeOptionalLowercaseString(originProvider);
-  if (!rawProvider) {
+  const rawProvider = config ? normalizeOptionalLowercaseString(originProvider) : undefined;
+  if (!config || !rawProvider) {
     return {
       currentMessageId,
       currentSourceTurnId,
@@ -261,29 +249,13 @@ export function resolveRunFastModeForFallbackCandidate(params: {
     agentId: params.run.agentId,
     sessionEntry: params.sessionEntry,
   });
-  if (params.run.fastModeOverride) {
-    return {
-      fastMode: params.run.fastMode,
-      fastModeAutoOnSeconds: params.run.fastModeAutoOnSecondsOverride
-        ? params.run.fastModeAutoOnSeconds
-        : state.fastAutoOnSeconds,
-    };
-  }
   return {
-    fastMode: state.mode,
+    fastMode: params.run.fastModeOverride ? params.run.fastMode : state.mode,
     fastModeAutoOnSeconds: params.run.fastModeAutoOnSecondsOverride
       ? params.run.fastModeAutoOnSeconds
       : state.fastAutoOnSeconds,
   };
 }
-/** Builds base embedded run params with auth and provider runtime hints. */
-function buildEmbeddedRunBaseParams(params: Parameters<typeof buildEmbeddedRunBaseParamsCore>[0]) {
-  return buildEmbeddedRunBaseParamsCore({
-    ...params,
-    isReasoningTagProvider,
-  });
-}
-
 function buildEmbeddedContextFromTemplate(params: {
   run: FollowupRun["run"];
   replyRoute?: EmbeddedReplyRoute;
@@ -325,7 +297,7 @@ function buildEmbeddedContextFromTemplate(params: {
     chatId:
       normalizeOptionalString(sessionCtx.NativeChannelId) ??
       normalizeOptionalString(sessionCtx.ChatId),
-    memberRoleIds: normalizeMemberRoleIds(sessionCtx.MemberRoleIds),
+    memberRoleIds: normalizeOptionalTrimmedStringList(sessionCtx.MemberRoleIds),
     // Provider threading context for tool auto-injection
     ...buildThreadingToolContext({
       sessionCtx,
@@ -334,15 +306,6 @@ function buildEmbeddedContextFromTemplate(params: {
     }),
     currentInboundAudio: hasInboundAudio(sessionCtx),
   };
-}
-
-function normalizeMemberRoleIds(value: TemplateContext["MemberRoleIds"]): string[] | undefined {
-  const roles = Array.isArray(value)
-    ? value
-        .map((roleId) => normalizeOptionalString(roleId))
-        .filter((roleId): roleId is string => Boolean(roleId))
-    : [];
-  return roles.length > 0 ? roles : undefined;
 }
 
 function buildTemplateSenderContext(sessionCtx: TemplateContext) {
