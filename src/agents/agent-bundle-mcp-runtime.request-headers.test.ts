@@ -9,7 +9,7 @@ import { startRequestHeaderMcpProofServer } from "./agent-bundle-mcp-request-hea
 import { materializeBundleMcpToolsForRun } from "./agent-bundle-mcp-tools.js";
 import type { SessionMcpRuntime } from "./agent-bundle-mcp-types.js";
 import { createMcpProofPluginRegistry } from "./mcp-connection-resolver.test-fixtures.js";
-import { runWithMcpRequestContext } from "./mcp-request-context.js";
+import { bindMcpRequestRun, runWithMcpRequestContext } from "./mcp-request-context.js";
 
 const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 
@@ -74,17 +74,35 @@ describe("per-request MCP headers", () => {
         });
         const runtimes: SessionMcpRuntime[] = [];
         const materialized: Awaited<ReturnType<typeof materializeBundleMcpToolsForRun>>[] = [];
+        type Tools = Awaited<ReturnType<typeof materializeBundleMcpToolsForRun>>;
+        // Each turn stays admitted until released, as a host run spans acquisition and execution.
+        const turns = new Map<string, { release: () => void; settled: Promise<unknown> }>();
         const acquire = (runId?: string) =>
-          runWithMcpRequestContext(runId ? context(runId) : undefined, async () => {
-            const lease = await manager.acquire(params);
-            runtimes.push(lease.runtime);
-            if (runId === "second") {
-              secondAcquired.resolve();
-            }
-            const tools = await materializeBundleMcpToolsForRun(lease);
-            materialized.push(tools);
-            return tools;
+          new Promise<Tools>((resolveTools, rejectTools) => {
+            const release = createDeferred();
+            const body = async () => {
+              const lease = await manager.acquire(params);
+              runtimes.push(lease.runtime);
+              if (runId === "second") {
+                secondAcquired.resolve();
+              }
+              const tools = await materializeBundleMcpToolsForRun(lease);
+              materialized.push(tools);
+              resolveTools(tools);
+              await release.promise;
+            };
+            const settled = (
+              runId
+                ? bindMcpRequestRun(context(runId), body)
+                : runWithMcpRequestContext(undefined, body)
+            ).catch(rejectTools);
+            turns.set(runId ?? "empty", { release: () => release.resolve(), settled });
           });
+        const settleTurn = async (runId: string) => {
+          const turn = expectDefined(turns.get(runId), `turn ${runId}`);
+          turn.release();
+          await turn.settled;
+        };
         try {
           const firstPending = acquire("first");
           await discoveryStarted.promise;
@@ -117,9 +135,7 @@ describe("per-request MCP headers", () => {
             ).execute(id, {});
           // These executors outlive their materialization scopes. A concurrent caller's
           // ambient context must not replace their captured attribution.
-          const firstCall = runWithMcpRequestContext(context("unrelated"), () =>
-            execute(first, "one"),
-          );
+          const firstCall = bindMcpRequestRun(context("unrelated"), () => execute(first, "one"));
           await callStarted.first.promise;
           const secondCall = execute(second, "two");
           await callStarted.second.promise;
@@ -129,20 +145,27 @@ describe("per-request MCP headers", () => {
           await firstCall;
           holdCalls = false;
           const providerCalls = provider.mock.calls.length;
-          await runWithMcpRequestContext(context("unrelated"), () => execute(empty, "empty"));
+          await bindMcpRequestRun(context("unrelated"), () => execute(empty, "empty"));
+          expect(provider).toHaveBeenCalledTimes(providerCalls);
+          // A settled run's executors lose their attribution instead of signing for it later.
+          await settleTurn("first");
+          await bindMcpRequestRun(context("unrelated"), () => execute(first, "late"));
           expect(provider).toHaveBeenCalledTimes(providerCalls);
           const calls = proof.requests.filter((request) => request.method === "tools/call");
           expect(calls.map((request) => request.headers.traceparent)).toEqual([
             "trace-second",
             "trace-first",
             undefined,
+            undefined,
           ]);
           expect(calls.map((request) => request.headers["x-turn-credential"])).toEqual([
             "credential-second",
             "credential-first",
             undefined,
+            undefined,
           ]);
           expect(calls.map((request) => request.headers.authorization)).toEqual([
+            "Bearer stable-auth",
             "Bearer stable-auth",
             "Bearer stable-auth",
             "Bearer stable-auth",
@@ -157,6 +180,10 @@ describe("per-request MCP headers", () => {
           releaseDiscovery.resolve();
           releaseCall.first.resolve();
           releaseCall.second.resolve();
+          for (const turn of turns.values()) {
+            turn.release();
+          }
+          await Promise.allSettled([...turns.values()].map((turn) => turn.settled));
           await Promise.allSettled(materialized.map((tools) => tools.dispose()));
           await manager.disposeAll();
           await proof.close();

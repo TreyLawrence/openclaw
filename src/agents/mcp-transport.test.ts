@@ -4,7 +4,7 @@ import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-reque
 import { partitionMcpServersByConnectionScope } from "./mcp-connection-resolver.js";
 import { createMcpProofPluginRegistry } from "./mcp-connection-resolver.test-fixtures.js";
 import type { McpOAuthIdentity } from "./mcp-oauth-identity.js";
-import { runWithMcpRequestContext } from "./mcp-request-context.js";
+import { bindMcpRequestRun } from "./mcp-request-context.js";
 import { resolveMcpTransport } from "./mcp-transport.js";
 
 type StreamableTransportOptions = {
@@ -158,7 +158,7 @@ describe("resolveMcpTransport", () => {
       .mockResolvedValueOnce(redirectResponse("https://mcp.example.com/next", 307))
       .mockResolvedValueOnce(redirectResponse("https://elsewhere.example/mcp", 307))
       .mockResolvedValueOnce(new Response("ok"));
-    await runWithMcpRequestContext({ sessionId: "session", runId: "turn" }, () =>
+    await bindMcpRequestRun({ sessionId: "session", runId: "turn" }, () =>
       latestStreamableFetch()("https://mcp.example.com/mcp", {
         method: "POST",
         headers: { Authorization: "Bearer static-token", "mcp-session-id": "real-session" },
@@ -191,11 +191,11 @@ describe("resolveMcpTransport", () => {
     );
     runtimeFetchMock.mockImplementation(async () => new Response("ok"));
     const eventFetch = latestSseEventSourceFetch();
-    await runWithMcpRequestContext({ sessionId: "session", runId: "first" }, () =>
+    await bindMcpRequestRun({ sessionId: "session", runId: "first" }, () =>
       eventFetch("https://mcp.example.com/sse"),
     );
     // Even reconnects occurring inside a later turn must not adopt that turn.
-    await runWithMcpRequestContext({ sessionId: "session", runId: "second" }, () =>
+    await bindMcpRequestRun({ sessionId: "session", runId: "second" }, () =>
       eventFetch("https://mcp.example.com/sse"),
     );
     expect(new Headers(runtimeFetchCall(0)[1]?.headers).get("x-turn")).toBe("first");
@@ -205,7 +205,7 @@ describe("resolveMcpTransport", () => {
     );
     const call = sseTransportConstructorMock.mock.calls.at(-1) as unknown[];
     const options = call[1] as StreamableTransportOptions;
-    await runWithMcpRequestContext({ sessionId: "session", runId: "second" }, () =>
+    await bindMcpRequestRun({ sessionId: "session", runId: "second" }, () =>
       options.fetch?.("https://mcp.example.com/messages", {
         method: "POST",
         headers: options.requestInit?.headers,

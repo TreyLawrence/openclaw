@@ -2,9 +2,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { isSecretValueRegisteredForRedaction } from "../logging/secret-redaction-registry.js";
 import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-request-scope.js";
-import type { OpenClawPluginMcpServerRequestHeaderProvider } from "../plugins/types.mcp-connection.js";
+import type {
+  McpServerRequestContext,
+  OpenClawPluginMcpServerRequestHeaderProvider,
+} from "../plugins/types.mcp-connection.js";
 import { createMcpProofPluginRegistry } from "./mcp-connection-resolver.test-fixtures.js";
-import { getMcpRequestContext, runWithMcpRequestContext } from "./mcp-request-context.js";
+import {
+  bindMcpRequestRun,
+  getMcpRequestContext,
+  runWithMcpRequestContext,
+  runWithMcpRequestMetadata,
+} from "./mcp-request-context.js";
 import { withMcpRequestHeaders } from "./mcp-request-headers.js";
 
 describe("MCP request headers", () => {
@@ -32,7 +40,7 @@ describe("MCP request headers", () => {
     const context = { sessionId: "s", runId: "one", metadata: { token: "original" } };
     let background: Promise<unknown> | undefined;
     const gate = createDeferred();
-    const run = runWithMcpRequestContext(context, async () => {
+    const run = bindMcpRequestRun(context, async () => {
       await Promise.resolve();
       expect(getMcpRequestContext()?.metadata?.token).toBe("original");
       expect(Object.isFrozen(getMcpRequestContext()?.metadata)).toBe(true);
@@ -48,6 +56,59 @@ describe("MCP request headers", () => {
     expect(await background).toBeUndefined();
   });
 
+  it("never resolves headers for identity the host did not bind", async () => {
+    const resolve = vi.fn(() => ({ "x-turn": "signed" }));
+    const { fetch, wrapped } = fixture(resolve);
+    const forged = Object.freeze({ sessionId: "victim-session", runId: "victim-run" });
+    await runWithMcpRequestContext(forged, () => wrapped("https://mcp.example/mcp"));
+    await runWithMcpRequestMetadata({ traceparent: "trace" }, () =>
+      wrapped("https://mcp.example/mcp"),
+    );
+    expect(resolve).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    for (const call of fetch.mock.calls) {
+      expect(new Headers(call[1]?.headers).has("x-turn")).toBe(false);
+    }
+  });
+
+  it("revokes a captured run context once its run settles", async () => {
+    const resolve = vi.fn((ctx: McpServerRequestContext) => ({ "x-turn": ctx.runId }));
+    const { fetch, wrapped } = fixture(resolve);
+    let captured: McpServerRequestContext | undefined;
+    await bindMcpRequestRun({ sessionId: "s", runId: "settled" }, () =>
+      runWithMcpRequestMetadata({ traceparent: "trace" }, () => {
+        captured = getMcpRequestContext();
+        expect(captured?.metadata?.traceparent).toBe("trace");
+      }),
+    );
+    expect(captured?.runId).toBe("settled");
+    await runWithMcpRequestContext(captured, () => wrapped("https://mcp.example/mcp"));
+    expect(resolve).not.toHaveBeenCalled();
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).has("x-turn")).toBe(false);
+  });
+
+  it("refuses dispatch when the run settles while headers resolve", async () => {
+    const resolving = createDeferred();
+    const headers = createDeferred<Record<string, string>>();
+    const runDone = createDeferred();
+    const { fetch, wrapped } = fixture(() => {
+      resolving.resolve();
+      return headers.promise;
+    });
+    let captured: McpServerRequestContext | undefined;
+    const run = bindMcpRequestRun({ sessionId: "s", runId: "one" }, async () => {
+      captured = getMcpRequestContext();
+      await runDone.promise;
+    });
+    const request = runWithMcpRequestContext(captured, () => wrapped("https://mcp.example/mcp"));
+    await resolving.promise;
+    runDone.resolve();
+    await run;
+    headers.resolve({ "x-turn": "signed" });
+    await expect(request).rejects.toThrow(/^MCP request context expired$/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("redacts provider values before fetch and preserves network errors", async () => {
     const { fetch, wrapped } = fixture(() => ({ "x-turn-token": "Bearer synthetic-turn-secret" }));
     const networkError = new Error("network failure");
@@ -57,9 +118,7 @@ describe("MCP request headers", () => {
       throw networkError;
     });
     await expect(
-      runWithMcpRequestContext({ sessionId: "s", runId: "one" }, () =>
-        wrapped("https://mcp.example/mcp"),
-      ),
+      bindMcpRequestRun({ sessionId: "s", runId: "one" }, () => wrapped("https://mcp.example/mcp")),
     ).rejects.toBe(networkError);
   });
 
@@ -74,7 +133,7 @@ describe("MCP request headers", () => {
     });
     let request: Promise<Response> | undefined;
     const canceled = new Error("Operation canceled");
-    const run = runWithMcpRequestContext({ sessionId: "s", runId: "one" }, () => {
+    const run = bindMcpRequestRun({ sessionId: "s", runId: "one" }, () => {
       request = wrapped("https://mcp.example/mcp", { signal: transport.signal });
       return operation.promise;
     });
@@ -92,7 +151,7 @@ describe("MCP request headers", () => {
 
   it("dispatches resolved volatile headers while the operation remains active", async () => {
     const { fetch, wrapped } = fixture(async () => ({ "x-turn": "synthetic-attribution" }));
-    await runWithMcpRequestContext({ sessionId: "s", runId: "one" }, () =>
+    await bindMcpRequestRun({ sessionId: "s", runId: "one" }, () =>
       wrapped("https://mcp.example/mcp", { headers: { "x-static": "stable" } }),
     );
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -110,7 +169,7 @@ describe("MCP request headers", () => {
       return headers.promise;
     });
     const aborted = new Error("Transport aborted");
-    const request = runWithMcpRequestContext({ sessionId: "s", runId: "one" }, () =>
+    const request = bindMcpRequestRun({ sessionId: "s", runId: "one" }, () =>
       wrapped("https://mcp.example/mcp", { signal: transport.signal }),
     );
     await resolving.promise;
@@ -125,9 +184,7 @@ describe("MCP request headers", () => {
     vi.useFakeTimers();
     const { fetch, wrapped } = fixture(() => new Promise(() => {}));
     const pending = expect(
-      runWithMcpRequestContext({ sessionId: "s", runId: "one" }, () =>
-        wrapped("https://mcp.example/mcp"),
-      ),
+      bindMcpRequestRun({ sessionId: "s", runId: "one" }, () => wrapped("https://mcp.example/mcp")),
     ).rejects.toThrow("MCP request header provider failed");
     await vi.advanceTimersByTimeAsync(10_000);
     await pending;
@@ -136,7 +193,7 @@ describe("MCP request headers", () => {
       throw new Error("private-provider-secret");
     });
     await expect(
-      runWithMcpRequestContext({ sessionId: "s", runId: "one" }, () =>
+      bindMcpRequestRun({ sessionId: "s", runId: "one" }, () =>
         throwing.wrapped("https://mcp.example/mcp"),
       ),
     ).rejects.toThrow(/^MCP request header provider failed$/);

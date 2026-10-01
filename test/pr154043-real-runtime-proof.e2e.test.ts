@@ -3,8 +3,14 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { isJSONRPCRequest, JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { createMcpProofPluginRegistry } from "../src/agents/mcp-connection-resolver.test-fixtures.js";
-import { runWithMcpRequestContext } from "../src/agents/mcp-request-context.js";
+import {
+  bindMcpRequestRun,
+  getMcpRequestContext,
+  runWithMcpRequestContext,
+} from "../src/agents/mcp-request-context.js";
 import { resolveMcpTransport } from "../src/agents/mcp-transport.js";
+import type { McpServerRequestContext } from "../src/plugin-sdk/agent-harness-runtime.js";
+import { runWithMcpRequestMetadata } from "../src/plugin-sdk/agent-harness-runtime.js";
 import { withPluginRuntimeRegistryScope } from "../src/plugins/runtime/gateway-request-scope.js";
 import { createDeferred } from "./helpers/promise.js";
 
@@ -75,9 +81,11 @@ describe("PR #154043 real runtime proof", () => {
       }
       const proof = createMcpProofPluginRegistry();
       let heldRequest = false;
+      const signedRuns: string[] = [];
       proof.apiFor("proof-attribution").registerMcpServerRequestHeaderProvider({
         serverName: "proof",
         async resolve(context) {
+          signedRuns.push(context.runId);
           if (context.runId === "canceled" && !heldRequest) {
             heldRequest = true;
             providerEntered.resolve();
@@ -126,7 +134,7 @@ describe("PR #154043 real runtime proof", () => {
 
       await client.connect(transport);
       await notificationStreamReceived.promise;
-      const allowed = await runWithMcpRequestContext(
+      const allowed = await bindMcpRequestRun(
         { sessionId: "proof-session", runId: "allowed" },
         () => client.callTool({ name: "allowed_operation" }),
       );
@@ -144,10 +152,8 @@ describe("PR #154043 real runtime proof", () => {
       console.log("[pr154043-proof] allowed: real tools/call arrived with volatile header present");
 
       const operation = new AbortController();
-      const canceled = runWithMcpRequestContext(
-        { sessionId: "proof-session", runId: "canceled" },
-        () =>
-          client.callTool({ name: "canceled_operation" }, undefined, { signal: operation.signal }),
+      const canceled = bindMcpRequestRun({ sessionId: "proof-session", runId: "canceled" }, () =>
+        client.callTool({ name: "canceled_operation" }, undefined, { signal: operation.signal }),
       );
       const rejected = expect(canceled).rejects.toThrow("synthetic operation canceled");
       await providerEntered.promise;
@@ -165,7 +171,7 @@ describe("PR #154043 real runtime proof", () => {
         "[pr154043-proof] canceled: rejected before I/O, server request count unchanged; pending send settled",
       );
 
-      await runWithMcpRequestContext({ sessionId: "proof-session", runId: "after-cancel" }, () =>
+      await bindMcpRequestRun({ sessionId: "proof-session", runId: "after-cancel" }, () =>
         client.callTool({ name: "after_cancel_operation" }),
       );
       expect(
@@ -174,6 +180,42 @@ describe("PR #154043 real runtime proof", () => {
         attribution: "synthetic-after-cancel",
       });
       console.log("[pr154043-proof] shared transport: subsequent attributed tools/call succeeded");
+
+      // Foreign identity: neither a forged context nor the public SDK helper can assert a run.
+      const forged = Object.freeze({ sessionId: "victim-session", runId: "victim-run" });
+      await runWithMcpRequestContext(forged, () =>
+        client.callTool({ name: "forged_identity_operation" }),
+      );
+      await runWithMcpRequestMetadata({ traceparent: "caller-trace" }, () =>
+        client.callTool({ name: "sdk_metadata_operation" }),
+      );
+      for (const toolName of ["forged_identity_operation", "sdk_metadata_operation"]) {
+        expect(requests.find((request) => request.toolName === toolName)).toMatchObject({
+          rpcMethod: "tools/call",
+          attribution: undefined,
+        });
+      }
+      expect(signedRuns).not.toContain("victim-run");
+      console.log(
+        "[pr154043-proof] foreign: forged and SDK-asserted identity reached the server unsigned; provider never saw victim-run",
+      );
+
+      // Reassigned identity: a context captured from a settled run is revoked before final I/O.
+      let captured: McpServerRequestContext | undefined;
+      await bindMcpRequestRun({ sessionId: "proof-session", runId: "settled" }, () => {
+        captured = getMcpRequestContext();
+      });
+      expect(captured?.runId).toBe("settled");
+      await runWithMcpRequestContext(captured, () =>
+        client.callTool({ name: "settled_run_operation" }),
+      );
+      expect(
+        requests.find((request) => request.toolName === "settled_run_operation"),
+      ).toMatchObject({ rpcMethod: "tools/call", attribution: undefined });
+      expect(signedRuns).not.toContain("settled");
+      console.log(
+        "[pr154043-proof] reassigned: settled run's captured context reached the server unsigned; provider never saw it",
+      );
     } finally {
       releaseProvider.resolve();
       await client.close();

@@ -482,7 +482,7 @@ rotates the connection. Request headers do not participate in the declarative
 catalog fingerprint or the connection-rotation digest.
 
 ```ts
-import { runWithMcpRequestContext } from "openclaw/plugin-sdk/agent-harness-runtime";
+import { runWithMcpRequestMetadata } from "openclaw/plugin-sdk/agent-harness-runtime";
 
 api.registerMcpServerRequestHeaderProvider({
   serverName: "user-email",
@@ -496,30 +496,32 @@ api.registerMcpServerRequestHeaderProvider({
   },
 });
 
-// Embedded callers scope acquisition and execution to their own turn.
+// Embedded callers may add tracing metadata; the host supplies run identity.
 // runTurn is the embedding application's operation, not an SDK export.
-await runWithMcpRequestContext({ sessionId, sessionKey, runId, metadata: { traceparent } }, () =>
-  runTurn(),
-);
+await runWithMcpRequestMetadata({ traceparent }, () => runTurn());
 ```
 
 Contract notes:
 
 - Context contains `sessionId`, `runId`, optional `sessionKey`, and optional
-  string-valued `metadata`. Core copies and freezes it when entering the scope.
-  The embedded backend supplies the actual run/session identity and preserves
-  enclosing caller metadata. Caller-supplied attribution does not replace the connection resolver's trusted
-  requester identity.
+  string-valued `metadata`. Only the host binds identity, and only to an admitted
+  run: the embedded backend supplies the actual run/session identity and keeps
+  enclosing caller metadata. Plugins and embedded callers cannot assert a session
+  or run ID, so a provider is never asked to sign for a foreign run.
+- A run's context is revoked when the run settles. Executors or retries that
+  outlive their run send no volatile headers, and a request whose run settles
+  while its headers resolve is refused before dispatch.
+- Caller metadata is attribution only; it does not replace the connection
+  resolver's trusted requester identity.
 - The provider runs at each same-origin HTTP request, including initial discovery
   and retried requests. HTTP and SSE request/event-source paths use the same
   provider contract. It is not called for stdio transports.
 - Overlapping turns keep independent contexts on the retained transport.
   Materialized tool executors retain their acquisition context and open a fresh
   operation scope when invoked; they never read a shared latest-turn value.
-- `runWithMcpRequestContext` returns a promise and closes its operation scope
-  when the callback settles. Missing context sends no volatile headers and does
-  not call the provider. `runWithMcpRequestContext(undefined, fn)` explicitly
-  clears inherited context.
+- `runWithMcpRequestMetadata` returns a promise and closes its scope when the
+  callback settles. Missing run context sends no volatile headers and does not
+  call the provider.
 - Initial SSE discovery can carry the discovery operation's context. Shared
   background streams and SSE reconnects send no volatile attribution, even when
   another turn is active. Retries belonging to an active HTTP operation keep

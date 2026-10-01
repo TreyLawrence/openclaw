@@ -10,7 +10,7 @@ import {
   OpenClawSSEClientTransport,
   OpenClawStreamableHTTPClientTransport,
 } from "./mcp-http-transport.js";
-import { getMcpRequestContext, runWithMcpRequestContext } from "./mcp-request-context.js";
+import { bindMcpRequestRun, getMcpRequestContext } from "./mcp-request-context.js";
 
 function jsonResponse(value: unknown, init?: ResponseInit): Response {
   const headers = new Headers(init?.headers);
@@ -117,7 +117,7 @@ describe("OpenClaw MCP HTTP lifecycle adapters", () => {
     });
     const client = new Client({ name: "test", version: "1" });
     try {
-      await runWithMcpRequestContext({ sessionId: "session", runId: "opening-turn" }, async () => {
+      await bindMcpRequestRun({ sessionId: "session", runId: "opening-turn" }, async () => {
         await client.connect(transport);
         await withTestTimeout(reconnected.promise, 1_000, "notification stream did not reconnect");
         expect(getMcpRequestContext()?.runId).toBe("opening-turn");
@@ -163,9 +163,8 @@ describe("OpenClaw MCP HTTP lifecycle adapters", () => {
     const client = new Client({ name: "test", version: "1" });
     try {
       await client.connect(transport);
-      const result = await runWithMcpRequestContext(
-        { sessionId: "session", runId: "rpc-turn" },
-        () => client.callTool({ name: "probe", arguments: {} }),
+      const result = await bindMcpRequestRun({ sessionId: "session", runId: "rpc-turn" }, () =>
+        client.callTool({ name: "probe", arguments: {} }),
       );
       expect(result).toMatchObject({ content: [{ text: "resumed" }] });
       expect(contexts).toEqual([undefined, "rpc-turn"]);

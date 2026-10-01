@@ -4,7 +4,7 @@ import {
   createOperationalRunInstanceRef,
   prepareAgentRunAdmission,
 } from "../../admitted-run-context.js";
-import { getMcpRequestContext, runWithMcpRequestContext } from "../../mcp-request-context.js";
+import { getMcpRequestContext, runWithMcpRequestMetadata } from "../../mcp-request-context.js";
 import { makeEmbeddedRunnerAttempt } from "../../test-helpers/embedded-agent-runner-e2e-fixtures.js";
 import {
   getCoreTtsAttemptResultMediaUrls,
@@ -38,19 +38,13 @@ describe("embedded attempt backend", () => {
       });
       return makeEmbeddedRunnerAttempt({});
     });
-    await runWithMcpRequestContext(
-      {
-        runId: "outer",
-        sessionId: "outer",
-        metadata: { traceparent: "trace-from-caller" },
-      },
-      () =>
-        runEmbeddedAttemptWithBackend({
-          runId: "actual-turn",
-          sessionId: "actual-session",
-          sessionKey: "actual-key",
-          admittedRunContext: { operationalRunInstance: createOperationalRunInstanceRef("test") },
-        } as never),
+    await runWithMcpRequestMetadata({ traceparent: "trace-from-caller" }, () =>
+      runEmbeddedAttemptWithBackend({
+        runId: "actual-turn",
+        sessionId: "actual-session",
+        sessionKey: "actual-key",
+        admittedRunContext: { operationalRunInstance: createOperationalRunInstanceRef("test") },
+      } as never),
     );
     expect(getMcpRequestContext()).toBeUndefined();
   });
