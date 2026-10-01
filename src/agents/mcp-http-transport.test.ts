@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import type { Socket } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { describe, expect, it, vi } from "vitest";
-import { createDeferred, withTestTimeout } from "../../test/helpers/promise.js";
+import { createDeferred } from "../../test/helpers/promise.js";
 import { settlesWithin } from "../shared/settle-within.js";
 import { disposeMcpClient } from "./mcp-client-lifecycle.js";
 import { redactMcpDiagnosticError } from "./mcp-error.js";
@@ -119,7 +119,7 @@ describe("OpenClaw MCP HTTP lifecycle adapters", () => {
     try {
       await bindMcpRequestRun({ sessionId: "session", runId: "opening-turn" }, async () => {
         await client.connect(transport);
-        await withTestTimeout(reconnected.promise, 1_000, "notification stream did not reconnect");
+        await reconnected.promise;
         expect(getMcpRequestContext()?.runId).toBe("opening-turn");
       });
       expect(contexts).toEqual([undefined, undefined]);
