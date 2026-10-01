@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
+import { withGuardedFetchRequestAuthority } from "../infra/net/fetch-request-authority.js";
 import { isSecretValueRegisteredForRedaction } from "../logging/secret-redaction-registry.js";
 import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-request-scope.js";
 import type {
@@ -106,6 +107,33 @@ describe("MCP request headers", () => {
     await run;
     headers.resolve({ "x-turn": "signed" });
     await expect(request).rejects.toThrow(/^MCP request context expired$/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("refuses dispatch when guarded caller authority is revoked while headers resolve", async () => {
+    const resolving = createDeferred();
+    const headers = createDeferred<Record<string, string>>();
+    const { fetch, wrapped } = fixture(() => {
+      resolving.resolve();
+      return headers.promise;
+    });
+    const revoked = new Error("caller authority revoked");
+    let authorityActive = true;
+    const request = withGuardedFetchRequestAuthority(
+      () => {
+        if (!authorityActive) {
+          throw revoked;
+        }
+      },
+      () =>
+        bindMcpRequestRun({ sessionId: "s", runId: "one" }, () =>
+          wrapped("https://mcp.example/mcp"),
+        ),
+    );
+    await resolving.promise;
+    authorityActive = false;
+    headers.resolve({ "x-turn": "signed" });
+    await expect(request).rejects.toBe(revoked);
     expect(fetch).not.toHaveBeenCalled();
   });
 

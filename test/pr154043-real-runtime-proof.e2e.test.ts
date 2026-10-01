@@ -9,6 +9,7 @@ import {
   runWithMcpRequestContext,
 } from "../src/agents/mcp-request-context.js";
 import { resolveMcpTransport } from "../src/agents/mcp-transport.js";
+import { withGuardedFetchRequestAuthority } from "../src/infra/net/fetch-request-authority.js";
 import type { McpServerRequestContext } from "../src/plugin-sdk/agent-harness-runtime.js";
 import { runWithMcpRequestMetadata } from "../src/plugin-sdk/agent-harness-runtime.js";
 import { withPluginRuntimeRegistryScope } from "../src/plugins/runtime/gateway-request-scope.js";
@@ -26,6 +27,8 @@ describe("PR #154043 real runtime proof", () => {
     const providerEntered = createDeferred();
     const releaseProvider = createDeferred();
     const cancellationSent = createDeferred();
+    const revocationProviderEntered = createDeferred();
+    const releaseRevocationProvider = createDeferred();
     const canceledSendFinished = createDeferred<
       { status: "fulfilled" } | { status: "rejected"; error: unknown }
     >();
@@ -86,6 +89,10 @@ describe("PR #154043 real runtime proof", () => {
         serverName: "proof",
         async resolve(context) {
           signedRuns.push(context.runId);
+          if (context.runId === "revoked-authority") {
+            revocationProviderEntered.resolve();
+            await releaseRevocationProvider.promise;
+          }
           if (context.runId === "canceled" && !heldRequest) {
             heldRequest = true;
             providerEntered.resolve();
@@ -216,8 +223,38 @@ describe("PR #154043 real runtime proof", () => {
       console.log(
         "[pr154043-proof] reassigned: settled run's captured context reached the server unsigned; provider never saw it",
       );
+
+      // Caller authority revoked while headers resolve, with the MCP run still active.
+      let callerAuthorityActive = true;
+      const revokedCall = withGuardedFetchRequestAuthority(
+        () => {
+          if (!callerAuthorityActive) {
+            throw new Error("synthetic caller authority revoked");
+          }
+        },
+        () =>
+          bindMcpRequestRun({ sessionId: "proof-session", runId: "revoked-authority" }, () =>
+            client.callTool({ name: "revoked_authority_operation" }),
+          ),
+      );
+      const revokedRejected = expect(revokedCall).rejects.toThrow(
+        "synthetic caller authority revoked",
+      );
+      await revocationProviderEntered.promise;
+      const beforeRevocation = requests.length;
+      callerAuthorityActive = false;
+      releaseRevocationProvider.resolve();
+      await revokedRejected;
+      expect(requests).toHaveLength(beforeRevocation);
+      expect(
+        requests.filter((request) => request.toolName === "revoked_authority_operation"),
+      ).toEqual([]);
+      console.log(
+        "[pr154043-proof] revoked authority: provider resolved, caller authority revoked mid-resolution; rejected before I/O, server request count unchanged",
+      );
     } finally {
       releaseProvider.resolve();
+      releaseRevocationProvider.resolve();
       await client.close();
       restoreSend?.();
       if (server.listening) {

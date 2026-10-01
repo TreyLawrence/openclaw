@@ -1,4 +1,5 @@
 import type { GuardedFetchOptions } from "../infra/net/fetch-guard.js";
+import { captureGuardedFetchRequestAuthority } from "../infra/net/fetch-request-authority.js";
 import { registerSecretValueForRedaction } from "../logging/secret-redaction-registry.js";
 import { getActivePluginRegistry } from "../plugins/runtime.js";
 import { getPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
@@ -40,6 +41,8 @@ export function withMcpRequestHeaders(params: {
     if (!context || new URL(url).origin !== origin) {
       return params.fetchFn(input, init);
     }
+    // Guarded fetch asserted caller authority before calling us; resolution awaits after that.
+    const assertCallerCurrent = captureGuardedFetchRequestAuthority();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const headers = new Headers(
       init?.headers ?? (input instanceof Request ? input.headers : undefined),
@@ -77,6 +80,7 @@ export function withMcpRequestHeaders(params: {
       clearTimeout(timer);
     }
     init?.signal?.throwIfAborted();
+    assertCallerCurrent?.();
     if (getMcpRequestContext() !== context) {
       throw new Error("MCP request context expired");
     }
