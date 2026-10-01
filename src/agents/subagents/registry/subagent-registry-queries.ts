@@ -1,8 +1,3 @@
-/**
- * Shared subagent registry query helpers.
- *
- * Combines snapshot traversal with current execution and reservation ownership.
- */
 import type { DeliveryContext } from "../../../utils/delivery-context.types.js";
 import { isDeliverySuspended } from "./subagent-delivery-state.js";
 import {
@@ -81,9 +76,8 @@ export function listRunsForRequesterFromRuns(
       ? undefined
       : buildLatestSubagentRunReadIndexFromRuns(runs);
 
-  const results: SubagentRunRecord[] = [];
-  for (const entry of runs.values()) {
-    if (
+  return [...runs.values()].filter(
+    (entry) =>
       entry.requesterSessionKey === key &&
       (options?.requesterSessionId === undefined ||
         matchesSubagentRequesterSession(entry, {
@@ -95,12 +89,8 @@ export function listRunsForRequesterFromRuns(
       (options?.requesterStorePath === undefined ||
         (entry.requesterStorePath ?? null) === options.requesterStorePath) &&
       (typeof lowerBound !== "number" || entry.createdAt >= lowerBound) &&
-      (typeof upperBound !== "number" || entry.createdAt <= upperBound)
-    ) {
-      results.push(entry);
-    }
-  }
-  return results;
+      (typeof upperBound !== "number" || entry.createdAt <= upperBound),
+  );
 }
 
 export function selectConnectedSettledSubagentWave(
@@ -162,29 +152,22 @@ export function selectConnectedSettledSubagentWave(
   return [];
 }
 
-/** Lists runs controlled by the normalized controller session key. */
 export function listRunsForControllerFromRuns<T extends SubagentRunReadRecord>(
   runs: Map<string, T>,
   controllerSessionKey: string,
   controllerAgentId?: string,
 ): T[] {
   const key = controllerSessionKey.trim();
-  const results: T[] = [];
   if (!key) {
-    return results;
+    return [];
   }
-  for (const entry of runs.values()) {
-    if (
+  return [...runs.values()].filter(
+    (entry) =>
       resolveControllerSessionKey(entry) === key &&
-      (!controllerAgentId || entry.requesterAgentId === controllerAgentId)
-    ) {
-      results.push(entry);
-    }
-  }
-  return results;
+      (!controllerAgentId || entry.requesterAgentId === controllerAgentId),
+  );
 }
 
-/** Cached read index for display, controller grouping, and descendant queries. */
 export type SubagentRunReadIndex<T extends SubagentRunReadRecord = SubagentRunRecord> = {
   inputs: { runs: Map<string, T>; inMemoryRuns: Iterable<T> };
   /** Identity of published topology facts, shared by clock-specific views. */
@@ -216,7 +199,6 @@ export type LatestSubagentRunReadIndex<T extends SubagentRunReadRecord = Subagen
   getLatestSubagentRun(childSessionKey: string): T | null;
 };
 
-/** Builds a reusable latest-generation lookup from one registry snapshot. */
 export function buildLatestSubagentRunReadIndexFromRuns<T extends SubagentRunReadRecord>(
   runs: Map<string, T>,
 ): LatestSubagentRunReadIndex<T> {
@@ -240,7 +222,6 @@ type SubagentRunReadIndexParams<T extends SubagentRunReadRecord> = {
   now?: number;
 };
 
-/** Builds a read index from snapshot and optional in-memory runs. */
 export function buildSubagentRunReadIndexFromRuns<T extends SubagentRunReadRecord>(
   params: SubagentRunReadIndexParams<T>,
 ): SubagentRunReadIndex<T> {
@@ -469,7 +450,6 @@ export function getSubagentRunByChildSessionKeyFromRuns(
   return latestActive ?? latestEnded;
 }
 
-/** Resolves the requester and delivery origin for the latest child-session run. */
 export function resolveRequesterForChildSessionFromRuns(
   runs: Map<string, SubagentRunRecord>,
   childSessionKey: string,
@@ -489,7 +469,6 @@ export function resolveRequesterForChildSessionFromRuns(
   };
 }
 
-/** Returns whether post-completion announce should be skipped for a cleaned-up run. */
 export function shouldIgnorePostCompletionAnnounceForSessionFromRuns(
   runs: Map<string, SubagentRunRecord>,
   childSessionKey: string,
@@ -587,7 +566,6 @@ function scopeRootDescendantsToRequesterAgent(
     : runs;
 }
 
-/** Counts live descendants under a requester/session tree. */
 export function countActiveDescendantRunsFromRuns(
   runs: Map<string, SubagentRunRecord>,
   rootSessionKey: string,
@@ -640,7 +618,6 @@ export function hasDescendantRunAwaitingSettleFromRuns(
   }).hasDescendantRunAwaitingSettle(rootSessionKey, excludeRunId, settledBefore);
 }
 
-/** Lists latest descendant runs under a requester/session tree. */
 export function listDescendantRunsForRequesterFromRuns(
   runs: Map<string, SubagentRunRecord>,
   rootSessionKey: string,

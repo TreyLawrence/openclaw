@@ -123,6 +123,17 @@ Long-press a session in the sidebar or Sessions screen to open its session actio
 
 A colored session has a narrow leading stripe in session lists and a small dot beside its title in Chat. Unset colors show neither marker. The Gateway stores color names, not hex values; the app adjusts their hues for light and dark appearances.
 
+## Reactions
+
+Saved prompts and assistant replies show emoji reaction chips with counts and
+reactor names for VoiceOver. Tap a chip to toggle your reaction, or long-press a
+message and choose **Add Reaction** for the quick palette. **More…** accepts one
+typed or pasted emoji. Reactions update live while the session is open and do
+not create notifications. Reaction controls follow the Gateway's advertised
+methods, operator scopes, session cap, and current sharing role; sessions you
+can only view show the chips without reaction controls. Archived and catalog
+sessions do not offer reaction controls.
+
 ## Message times and models
 
 Completed message groups show relative time for the past week and a compact
@@ -635,6 +646,7 @@ The app keeps a registry of every Gateway it has paired with, so you can switch 
 - Credentials, TLS trust decisions, per-gateway preferences, and cached chat history are stored per Gateway. Switching never mixes state between Gateways, and push registration follows the active Gateway.
 - Swipe a paired Gateway (or use its context menu) to **Forget** it, which removes its credentials, device tokens, TLS pin, and cached chats.
 - Discovered Gateways must be visible on the network to switch to them; manual Gateways reconnect by saved host and port.
+- Demo and screenshot mode hide saved Gateways: the sidebar picker and **Settings → Gateway** show only the fixture connection, without the **Paired Gateways** list or the manual Gateway, credential, and custom header settings. Scan a QR code or paste a setup code to connect a real Gateway.
 
 ## Computer Use relationship
 

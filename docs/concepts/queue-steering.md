@@ -40,6 +40,8 @@ The native Codex app-server harness exposes `turn/steer` instead of OpenClaw run
 
 Codex review and manual compaction turns reject same-turn steering. When a runtime cannot accept steering in `steer` mode, OpenClaw waits for the active run to finish before starting the prompt.
 
+On Codex installs without native hook admission, another person's message queues as a follow-up instead of steering the active turn when native sub-agent spawning is available. If the thread's policy already disables native spawning, including ChatGPT token sharing and report-only delegation, other people can still steer the running turn.
+
 Once an OpenClaw turn has finished or handed off, new prompts wait for the next turn even while cleanup is still running. Retries and compaction within the current turn can still receive steering.
 
 ## Tool launch boundaries
@@ -86,6 +88,11 @@ people have steered the turn, the agent must pass that person's verified
 `requester_profile.id` as `user` to choose whose view or appearance to change,
 and ask if it is unclear. Each authenticated Control UI message includes its
 requester's verified profile id in the agent's user-role conversation context.
+Session tools and `sessions_spawn` also use the requester's verified
+`requester_profile.id` as `user` when several people have steered the turn. Session
+access and spawned-child authority use that person's permissions. Steered turns,
+like later turns in the session, use the session's selected model account.
+Unselected session calls in a multi-person turn may use the owner's authority only for that turn's own session; other targets and session-wide discovery require a session tool with the requester's `requester_profile.id` as `user`.
 Personal instructions and other personal settings without a `user` selector
 cannot be read or changed from a turn several people have steered. The person
 should ask in their own turn with a new Control UI message. For Crabbox open-and-show requests in a
@@ -110,6 +117,10 @@ that personal context, and collected messages keep the same session selection. R
 takes effect on the next new turn; it does not replace the running turn's personal
 instructions. Personal context selection does not grant tool permissions or
 change the approval destination.
+
+Accepted cross-session steering retains the selected sender's source authority
+after the sending turn finishes. Access revocation can still block an input
+before its transcript commit.
 
 A visible message or send acknowledgment does not mean the active runtime has
 consumed it. The Control UI shows specific notices when an accepted message is

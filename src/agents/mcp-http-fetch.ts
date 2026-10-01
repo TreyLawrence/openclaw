@@ -13,6 +13,7 @@ import {
 } from "../infra/net/ssrf.js";
 import { loadUndiciRuntimeDeps } from "../infra/net/undici-runtime.js";
 import { withMcpRequestHeaders } from "./mcp-request-headers.js";
+import type { ResolvedHttpMcpTransportConfig } from "./mcp-transport-config.js";
 
 /** Default MCP HTTP fetch backed by lazy-loaded undici runtime deps. */
 const fetchWithUndici: FetchLike = async (url, init) =>
@@ -27,6 +28,21 @@ const fetchWithUndiciGuard = async (
 ): Promise<Response> => await fetchWithUndici(input instanceof Request ? input.url : input, init);
 
 const MCP_HTTP_MAX_REDIRECTS = 20;
+
+type McpHttpFetchParams = {
+  sslVerify?: boolean;
+  clientCert?: string;
+  clientKey?: string;
+  resourceUrl?: string;
+  serverName?: string;
+  timeoutMs?: number;
+  beforeRequest?: () => void;
+};
+
+type McpOAuthHttpFetchParams = McpHttpFetchParams & {
+  resourceUrl: string;
+  headers?: Record<string, string>;
+};
 
 function resolveFetchRequest(input: RequestInfo | URL, init?: RequestInit) {
   if (input instanceof Request) {
@@ -74,16 +90,10 @@ async function buildManagedMcpResponse(
   );
 }
 
-/** Builds an MCP fetch function with optional TLS/client-cert dispatcher support. */
-export function buildMcpHttpFetch(params: {
-  sslVerify?: boolean;
-  clientCert?: string;
-  clientKey?: string;
-  resourceUrl?: string;
-  serverName?: string;
-  timeoutMs?: number;
-  beforeRequest?: () => void;
-}): FetchLike {
+function buildMcpHttpFetchWithRedirectPolicy(
+  params: McpHttpFetchParams,
+  redirectPolicy: "replay" | "reject",
+): FetchLike {
   const fetchImpl =
     params.serverName && params.resourceUrl
       ? withMcpRequestHeaders({
@@ -119,7 +129,9 @@ export function buildMcpHttpFetch(params: {
       init: request.init,
       fetchImpl,
       maxRedirects: MCP_HTTP_MAX_REDIRECTS,
-      allowCrossOriginUnsafeRedirectReplay: true,
+      ...(redirectPolicy === "reject"
+        ? { rejectCrossOriginUnsafeRedirectReplay: true }
+        : { allowCrossOriginUnsafeRedirectReplay: true }),
       auditContext: "mcp-http",
       useEnvProxyForEligibleUrls: true,
       beforeRequest: params.beforeRequest,
@@ -131,6 +143,21 @@ export function buildMcpHttpFetch(params: {
     const guarded = await fetchWithSsrFGuard(guardedFetchOptions);
     return await buildManagedMcpResponse(guarded.response, guarded.release, guarded.refreshTimeout);
   };
+}
+
+/** Builds an MCP resource fetch with optional TLS/client-cert dispatcher support. */
+export function buildMcpHttpFetch(params: McpHttpFetchParams): FetchLike {
+  return buildMcpHttpFetchWithRedirectPolicy(params, "replay");
+}
+
+/** Builds an OAuth fetch with scoped resource headers and fail-closed redirect replay. */
+export function buildMcpOAuthHttpFetch(params: McpOAuthHttpFetchParams): FetchLike {
+  const { headers, ...fetchParams } = params;
+  return withSameOriginMcpHttpHeaders({
+    fetchFn: buildMcpHttpFetchWithRedirectPolicy(fetchParams, "reject"),
+    headers: withoutMcpAuthorizationHeader(headers),
+    resourceUrl: params.resourceUrl,
+  });
 }
 
 /** Removes Authorization from MCP headers before forwarding to non-authorized paths. */
@@ -164,4 +191,20 @@ export function withSameOriginMcpHttpHeaders(params: {
     }
     return params.fetchFn(url, { ...(init as RequestInit), headers });
   };
+}
+
+/** OAuth discovery and token responses are short-lived, so the deadline covers their bodies. */
+export function buildMcpOAuthAuthorizationFetch(
+  config: ResolvedHttpMcpTransportConfig,
+  beforeRequest?: () => void,
+): FetchLike {
+  return buildMcpOAuthHttpFetch({
+    sslVerify: config.sslVerify,
+    clientCert: config.clientCert,
+    clientKey: config.clientKey,
+    resourceUrl: config.url,
+    timeoutMs: config.requestTimeoutMs,
+    beforeRequest,
+    headers: config.headers,
+  });
 }

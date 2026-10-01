@@ -1,4 +1,3 @@
-// Defines official external install records for plugins.
 import type { PluginInstallRecord } from "../config/types.plugins.js";
 import { normalizeClawHubSha256Integrity } from "../infra/clawhub-integrity.js";
 import { parseClawHubPluginSpec } from "../infra/clawhub-spec.js";
@@ -332,19 +331,6 @@ export function resolveTrustedSourceLinkedOfficialNpmSpec(params: {
   record: PluginInstallRecord;
 }): string | undefined {
   return resolveTrustedSourceLinkedOfficialNpmInstall(params)?.npmSpec;
-}
-
-export function hasOfficialNpmIdReplacement(params: {
-  pluginId: string;
-  record?: PluginInstallRecord;
-}): boolean {
-  return (
-    params.record !== undefined &&
-    resolveTrustedSourceLinkedOfficialNpmInstall({
-      pluginId: params.pluginId,
-      record: params.record,
-    })?.replacementPluginId !== undefined
-  );
 }
 
 /** Resolves the official ClawHub spec when a trusted-source install record matches. */

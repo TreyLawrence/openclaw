@@ -9,11 +9,13 @@ import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
 import type { DummyRuleMap, OxlintConfig } from "oxlint";
+import { ensureKyselyTypes } from "./generate-kysely-types.mts";
 import { limitsAreAdvisory, reportLimitViolations } from "./lib/check-limits.mts";
 import { parseStaticDiagnostics } from "./lib/ci-static-check-evidence.mjs";
 import { isDirectRunUrl } from "./lib/direct-run.mjs";
 import {
   distArtifactEntryArgs,
+  resolveDistArtifactLockPath,
   withDistArtifactOwnership,
 } from "./lib/dist-artifact-ownership.mts";
 import {
@@ -148,6 +150,7 @@ async function runWithAdvisoryLimits(
   bin: string,
   args: string[],
   env: NodeJS.ProcessEnv,
+  ownedDirectory?: string,
 ): Promise<OxlintRunResult> {
   const configOption = oxlintOption(args, "--config", "-c");
   const configPath = path.resolve(configOption.value ?? ".oxlintrc.json");
@@ -213,6 +216,18 @@ async function runWithAdvisoryLimits(
   enabled &&= githubAdvisory || Boolean(untouchedExclusions);
   if (!enabled && !evidenceEnabled) {
     return { status: await runManagedCommand(command) };
+  }
+
+  if (enabled) {
+    const configRoot = fs.realpathSync(path.dirname(configPath));
+    const directory = resolveDistArtifactLockPath(configRoot);
+    if (ownedDirectory !== directory) {
+      // Oxlint anchors inherited globs at this directory. Keep its transient
+      // config here, but exclude compilers from the entire create/remove lifetime.
+      return await withDistArtifactOwnership(configRoot, () =>
+        runWithAdvisoryLimits(bin, args, env, directory),
+      );
+    }
   }
 
   // CLI --warn cannot replace scoped severities and enables rules outside their file scopes.
@@ -645,26 +660,32 @@ export async function runOxlint(
     return { status: 0 };
   }
 
-  if (needsArtifactPreparation) {
-    // Declaration compilation owns its Go policy; lint limits belong to the oxlint child.
-    await prepareExtensionPackageBoundaryArtifacts(localEnv);
-  }
-  return await runWithAdvisoryLimits(
-    oxlintPath,
-    finalArgs,
-    resolveOxlintToolchainEnv(oxlintPath, env),
-  );
+  const root = process.cwd();
+  const run = async (ownedDirectory?: string) => {
+    if (!focusedConfig) {
+      // Type-aware rules resolve Kysely schema projections, which are generated, not tracked.
+      await ensureKyselyTypes(root);
+    }
+    if (needsArtifactPreparation) {
+      // Declaration compilation owns its Go policy; lint limits belong to the oxlint child.
+      await prepareExtensionPackageBoundaryArtifacts(localEnv);
+    }
+    return await runWithAdvisoryLimits(
+      oxlintPath,
+      finalArgs,
+      resolveOxlintToolchainEnv(oxlintPath, env),
+      ownedDirectory,
+    );
+  };
+  // Skip-prepare callers still consume shared declarations. Hold one owner across
+  // preparation and lint; source-only lint acquires it only for transient config.
+  return !focusedConfig && shouldPrepareExtensionPackageBoundaryArtifacts(argv)
+    ? await withDistArtifactOwnership(root, () => run(resolveDistArtifactLockPath(root)))
+    : await run();
 }
 
 if (isDirectRunUrl(process.argv[1], import.meta.url)) {
-  const argv = process.argv.slice(2);
-  // Skip-prepare callers still consume shared declarations. Source-only lint
-  // remains independent; sharded lint inherits its parent's owner.
-  const result =
-    !argv.includes(OPENCLAW_FOCUSED_CONFIG_FLAG) &&
-    shouldPrepareExtensionPackageBoundaryArtifacts(argv)
-      ? await withDistArtifactOwnership(process.cwd(), () => runOxlint(argv))
-      : await runOxlint(argv);
+  const result = await runOxlint();
   process.exitCode = result.status;
   if (result.evidence) {
     console.log(`\n[ci-static:oxlint:leaf] ${JSON.stringify(result.evidence)}`);

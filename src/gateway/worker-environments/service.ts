@@ -8,7 +8,7 @@ import type { WorkerExecutionMode } from "../../plugins/types.js";
 import { runOutsideAsyncWorkScope } from "../../shared/async-work-scope.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { runTasksWithConcurrency } from "../../utils/run-with-concurrency.js";
-import { workerBootstrapOperationTimeoutMs } from "./bootstrap.js";
+import { workerBootstrapOperationTimeoutMs } from "./bootstrap-timeouts.js";
 import { createWorkerEnvironmentBuildPreparation } from "./build-preparation.js";
 import type { WorkerInstallationArtifact } from "./bundle.js";
 import { createWorkerCredentialBroker } from "./credential-broker.js";
@@ -475,7 +475,7 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
     }
     credentialBroker.clear();
     options.liveEvents?.clear();
-    options.stopNodeWorkerBundleTransfers?.();
+    await options.stopNodeWorkerBundleTransfers?.();
     try {
       await joinWorkerTunnelStops([
         environmentAccess.stopAllTunnels(),
@@ -610,6 +610,7 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
     list: environmentAccess.list,
     readPreparedPoolSummary: preparedPool.summary,
     readReadyWorkerTarget: preparedPool.target,
+    readRuntimeRefresh: providerLifecycle.readRuntimeRefresh,
     supportsProviderExecutionMode: providerSupportsExecutionMode,
     supportsExecutionMode: (profileId: string, mode: WorkerExecutionMode) => {
       const profile = options.getConfig().cloudWorkers?.profiles?.[profileId];
@@ -637,6 +638,7 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
     supportsNodePortal: async (environmentId: string, ownerEpoch: number) =>
       (await options.nodePortalCarrier?.supports(environmentId, ownerEpoch)) === true,
     hasPendingNodeEnrollmentSetup: store.hasPendingNodeEnrollmentSetup.bind(store),
+    admitsNodeSetupCompletion: options.admitsNodeSetupCompletion,
     readProviderDisplayId: providerLifecycle.readProviderDisplayId,
     listMachineOptions: providerLifecycle.listMachineOptions,
     listOperatingSystems: providerLifecycle.listOperatingSystems,
@@ -684,7 +686,10 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
     validateWorkerConnection: turnRpc.validateWorkerConnection,
     commitTranscript: turnRpc.commitTranscript,
     pushLiveEvent: turnRpc.pushLiveEvent,
-    executeSessionTool: turnRpc.executeSessionTool,
+    getToolSurface: turnRpc.getToolSurface,
+    invokeGatewayTool: turnRpc.invokeGatewayTool,
+    cancelGatewayTool: turnRpc.cancelGatewayTool,
+    createGatewayTools: options.createGatewayTools,
     executeComputer: turnRpc.executeComputer,
     prepareComputer: options.prepareComputer,
     startInference: turnRpc.startInference,
