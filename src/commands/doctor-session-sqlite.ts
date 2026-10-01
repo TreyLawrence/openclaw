@@ -44,6 +44,7 @@ import {
   writeSessionSqliteMigrationManifest,
   type ActiveSessionSqliteMigrationRun,
   type SessionSqliteMigrationMove,
+  type SessionSqliteMigrationMoveKind,
 } from "../infra/session-sqlite-migration-manifest.js";
 import {
   readOnlySqliteValidationSnapshot,
@@ -88,6 +89,7 @@ import { settleDuplicateSessionSqliteArchives } from "./doctor-session-sqlite-re
 import {
   createMigrationTargetInput,
   filterLegacySessionStoreTargets,
+  prepareDoctorSessionSqliteTargets,
   resolveDoctorSessionSqliteConfig,
   resolveDoctorSessionSqliteMaintenancePaths,
   resolveDoctorSessionSqliteMaintenanceRoots,
@@ -107,7 +109,6 @@ import {
 import { validateLegacySessionRecords } from "./doctor-session-sqlite-verification.js";
 import {
   assertDoctorSqliteMaintenancePathsNotAliased,
-  isDestructiveDoctorSessionSqliteMode,
   type DoctorSqliteMaintenanceAuthority,
 } from "./doctor-sqlite-maintenance-lock.js";
 export type {
@@ -126,30 +127,21 @@ const retainedArchivePlans = new WeakMap<
   }
 >();
 
-/**
- * Runs the targeted doctor SQLite session migration/inspection submode.
- * Destructive production callers hold the Gateway/SQLite-maintenance state lock for the full call.
- */
+/** Destructive production callers hold the Gateway/SQLite-maintenance state lock for the full call. */
 export async function runDoctorSessionSqlite(
   options: DoctorSessionSqliteOptions,
+  authority?: DoctorSqliteMaintenanceAuthority,
 ): Promise<DoctorSessionSqliteReport> {
   const env = options.env ?? process.env;
   const cfg = resolveDoctorSessionSqliteConfig(options);
   const configuredAgentIds = new Set(listAgentIds(cfg));
   const pendingPlugins = readDeferredPluginMigrations({ env });
   const verifyMissingIndex = createMissingSessionIndexVerifier({ cfg, env });
-  const { targets: candidates, knownTargets } = resolveDoctorSessionSqliteTargets({
-    ...options,
-    cfg,
-    env,
-  });
-  if (isDestructiveDoctorSessionSqliteMode(options.mode)) {
-    assertDoctorSqliteMaintenancePathsNotAliased(
-      `session SQLite ${options.mode}`,
-      resolveDoctorSessionSqliteMaintenancePaths(candidates),
-      resolveDoctorSessionSqliteMaintenanceRoots(candidates, env),
-    );
-  }
+  const {
+    targets: candidates,
+    knownTargets,
+    repairEntryStates,
+  } = await prepareDoctorSessionSqliteTargets({ ...options, cfg, env, authority });
   const settlements =
     options.mode === "import" || options.mode === "recover"
       ? await settleDuplicateSessionSqliteArchives({
@@ -179,22 +171,27 @@ export async function runDoctorSessionSqlite(
       env,
       options,
       targets,
+      prepareTarget: (target) => repairEntryStates([target]),
       recoveryInventory: historicalSources?.inventory,
       historicalArchiveStores: new Set([
         ...historicalArchives.keys(),
         ...settlements.map(({ target }) => target.storePath),
       ]),
       validateTarget: async (target) => {
+        authority?.assertCurrent();
         const report = collectHistoricalArchiveSources({ cfg, env }).sources.get(target.storePath)
           ?.transcripts.length
           ? (
-              await runDoctorSessionSqlite({
-                cfg,
-                env,
-                mode: "import",
-                store: target.storePath,
-                agent: target.agentId,
-              })
+              await runDoctorSessionSqlite(
+                {
+                  cfg,
+                  env,
+                  mode: "import",
+                  store: target.storePath,
+                  agent: target.agentId,
+                },
+                authority,
+              )
             ).targets[0]!
           : await inspectOrMigrateTarget({
               configuredAgentIds,
@@ -455,6 +452,11 @@ export async function runDoctorSessionSqlite(
   return report;
 }
 
+/** Verified originals retained for unavailable plugins still await settlement. */
+export function hasRetainedDoctorSessionSources(report: DoctorSessionSqliteReport): boolean {
+  return retainedArchivePlans.has(report);
+}
+
 /** Retire only this import's verified originals before the last plugin obligation clears. */
 export async function settleRetainedDoctorSessionSources(
   report: DoctorSessionSqliteReport,
@@ -665,7 +667,7 @@ async function inspectOrMigrateTarget(params: {
     archivedLegacyStoreFiles: [],
     issues,
   });
-  const retained = prepareRetainedSessionImport(params, issues);
+  const retained = await prepareRetainedSessionImport(params, report);
   if (!retained) {
     return report;
   }
@@ -1241,21 +1243,12 @@ async function archiveLegacyArtifacts(
     ) {
       continue;
     }
-    for (const source of listUnreferencedJsonlFiles(storePath, [
-      ...referencedPaths,
-      ...planned.keys(),
-    ])) {
-      if (retainedPaths.has(source)) {
-        continue;
-      }
-      if (capturedSources && !capturedSources.has(source)) {
-        continue;
-      }
+    const planUnreferencedMove = (source: string, kind: SessionSqliteMigrationMoveKind) => {
       try {
         const move = planSessionJsonlArchiveMove({
           archiveKey: "archive-tier",
           baseNameRaw: path.basename(source),
-          kind: "unreferenced-jsonl",
+          kind,
           reservedArchivePaths,
           sourcePathRaw: source,
           target: owner.target,
@@ -1269,8 +1262,57 @@ async function archiveLegacyArtifacts(
         };
         reservedArchivePaths.add(move.archivePath);
         planned.set(source, { move, owners: new Map([[owner, undefined]]) });
+        return true;
       } catch (error) {
         recordFailure(owner, source, error, true);
+        return false;
+      }
+    };
+    const pointers = new Set<string>();
+    for (const source of listUnreferencedJsonlFiles(storePath, [
+      ...referencedPaths,
+      ...planned.keys(),
+    ])) {
+      if (retainedPaths.has(source)) {
+        continue;
+      }
+      if (capturedSources && !capturedSources.has(source)) {
+        continue;
+      }
+      const pointer = resolveTrajectoryPointerPath(source);
+      if (planUnreferencedMove(source, "unreferenced-jsonl") && pointer) {
+        pointers.add(pointer);
+      }
+    }
+    // A pointer sidecar only locates its transcript's trajectory, so it settles with that
+    // transcript, including a receipt-verified one an earlier run archived without it.
+    const receiptSources = new Set(
+      owner.retainedImportVerified
+        ? (owner.verifiedSources ?? []).map((source) => source.path)
+        : [],
+    );
+    for (const transcript of receiptSources) {
+      const pointer = resolveTrajectoryPointerPath(transcript);
+      if (
+        pointer &&
+        receiptSources.has(pointer) &&
+        !owner.sourceConflicts?.has(transcript) &&
+        !fs.existsSync(transcript)
+      ) {
+        pointers.add(pointer);
+      }
+    }
+    for (const pointer of pointers) {
+      const source = canonicalMigrationFilePath(pointer);
+      if (
+        fs.existsSync(source) &&
+        !planned.has(source) &&
+        !referencedPaths.has(source) &&
+        !retainedPaths.has(source) &&
+        !owner.sourceConflicts?.has(pointer) &&
+        (!capturedSources || capturedSources.has(source))
+      ) {
+        planUnreferencedMove(source, "trajectory");
       }
     }
   }
