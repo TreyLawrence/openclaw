@@ -46,6 +46,7 @@ const noops = {
   registerAutoEnableProbe: () => {},
   registerProvider: () => {},
   registerWorkerProvider: () => {},
+  registerStorageProvider: () => {},
   registerModelCatalogProvider: () => {},
   registerEmbeddingProvider: () => {},
   registerSpeechProvider: () => {},
