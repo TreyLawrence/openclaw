@@ -64,9 +64,22 @@ function limitMcpResponseStream<Chunk extends Uint8Array>(
     checkEventLimit();
   };
 
-  return body.pipeThrough(
-    new TransformStream<Chunk, Chunk>({
-      transform(chunk, controller) {
+  const reader = body.getReader();
+  return new ReadableStream<Chunk>({
+    async pull(controller) {
+      let readResult;
+      try {
+        readResult = await reader.read();
+      } catch (err) {
+        controller.error(err);
+        return;
+      }
+      const { done, value: chunk } = readResult;
+      if (done) {
+        controller.close();
+        return;
+      }
+      try {
         if (!eventStream) {
           messageBytes += chunk.byteLength;
           if (messageBytes > STDIO_DEFAULT_MAX_BUFFER_SIZE) {
@@ -114,9 +127,15 @@ function limitMcpResponseStream<Chunk extends Uint8Array>(
           }
         }
         controller.enqueue(chunk);
-      },
-    }),
-  );
+      } catch (err) {
+        void reader.cancel(err).catch(() => undefined);
+        controller.error(err);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
 }
 
 function limitMcpHttpResponse(response: Response): Response {
@@ -301,11 +320,6 @@ export class OpenClawSSEClientTransport extends OpenClawMcpHttpTransport {
   }
 }
 
-type OpenClawStreamableHttpOptions = StreamableHTTPClientTransportOptions & {
-  fetch?: FetchLike;
-  requestInit?: RequestInit;
-};
-
 /** Owns Streamable HTTP notification recovery and stateful cleanup around SDK 1.30.0. */
 export class OpenClawStreamableHTTPClientTransport extends OpenClawMcpHttpTransport {
   protected readonly transport: StreamableHTTPClientTransport;
@@ -315,7 +329,7 @@ export class OpenClawStreamableHTTPClientTransport extends OpenClawMcpHttpTransp
   private pendingExpiredNotificationGet = false;
   private terminatedSessionId?: string;
 
-  constructor(url: URL, options: OpenClawStreamableHttpOptions = {}) {
+  constructor(url: URL, options: StreamableHTTPClientTransportOptions = {}) {
     super();
     this.url = url;
     this.cleanupFetch = options.fetch ?? fetch;

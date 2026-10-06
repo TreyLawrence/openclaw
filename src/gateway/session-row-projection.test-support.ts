@@ -13,6 +13,7 @@ import { resolveRequestedSessionAgentId } from "./session-request-agent.js";
 import {
   create as createSessionRow,
   sort as sortSessionRows,
+  type SelectionChange,
 } from "./session-row-projection-record.js";
 import { createSessionRowProjection, type SessionRowProjection } from "./session-row-projection.js";
 import { resolveStoredSessionKeyForAgentStore } from "./session-store-key.js";
@@ -41,6 +42,7 @@ export function createSessionRowProjectionFixture(params: {
   const storePath = params.storePath ?? "";
   const rowContext = params.rowContext ?? buildSessionListRowMetadataContext({ now: Date.now() });
   const rows = new Map<string, Row>();
+  const selectionListeners = new Set<(change: SelectionChange) => void>();
   const store = { ...params.store };
   let revision = 0;
   let revisionToken = {};
@@ -81,6 +83,9 @@ export function createSessionRowProjectionFixture(params: {
     delete store[key];
     revision++;
     revisionToken = {};
+    for (const listener of selectionListeners) {
+      listener({ kind: "reset" });
+    }
     if (!entry || entry.incognito || isIncognitoSessionKey(key)) {
       rows.delete(id(fields));
       return;
@@ -152,6 +157,9 @@ export function createSessionRowProjectionFixture(params: {
     return sortSessionRows(selected, query.sortBy);
   };
   const projection: SessionRowProjection = {
+    onSelectionChange(listener) {
+      selectionListeners.add(listener);
+    },
     observeGeneration() {
       const observedRevision = revision;
       let active = true;
@@ -186,10 +194,7 @@ export function createSessionRowProjectionFixture(params: {
     // This row-only fixture cannot certify the resident owner's complete ancestry graph.
     ancestorRows: () => undefined,
     setArchivePageSize: () => {},
-    modelFacts: (row) => {
-      const source = describe(row)!.materialized.source;
-      return { ...source, catalogEntry: source.thinkingProjection.catalogEntry };
-    },
+    modelFacts: (query) => describe(query)!.materialized.source,
     withPreparedExactRows: async (queries, consume) => {
       queries(cfg);
       return { kind: "complete", value: consume(projection) };
@@ -215,7 +220,6 @@ export function createSessionRowProjectionFixture(params: {
     prepareSelection: () => undefined,
     withSelectionPreparation: (consume) => consume(),
     needsSelectionPreparation: () => false,
-    isMaterialized: (query) => describe(query) !== undefined,
     prepareMembership: () => Promise.resolve(),
     needsMembershipPreparation: () => false,
     sessionGroupTargets: () => {
@@ -293,6 +297,10 @@ export function createSessionRowProjectionFixture(params: {
       revision++;
       revisionToken = {};
       rows.clear();
+      for (const listener of selectionListeners) {
+        listener({ kind: "reset" });
+      }
+      selectionListeners.clear();
     },
   };
   return Object.assign(projection, { setEntry });

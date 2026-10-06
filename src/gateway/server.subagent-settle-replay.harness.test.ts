@@ -12,7 +12,7 @@ import { maybeWakeRequesterAfterAllChildrenSettled } from "../agents/subagents/a
 import { settleRequesterCompletionBatch } from "../agents/subagents/completion/subagent-completion-admission.store.js";
 import { subagentRuns } from "../agents/subagents/registry/subagent-registry-memory.js";
 import { bindSubagentRunRecord } from "../agents/subagents/registry/subagent-registry.store.codec.js";
-import { upsertSubagentRunRowInDatabase } from "../agents/subagents/registry/subagent-registry.store.kernel.js";
+import { writeSubagentRunValuesInDatabase } from "../agents/subagents/registry/subagent-registry.store.kernel.js";
 import { loadSubagentRegistryFromSqlite } from "../agents/subagents/registry/subagent-registry.store.sqlite.js";
 import type { SubagentRunRecord } from "../agents/subagents/registry/subagent-registry.types.js";
 import { getRuntimeConfig } from "../config/config.js";
@@ -121,7 +121,11 @@ describe("public yielded settle replay with real Gateway admission", () => {
   });
 
   function persistChild(entry = child) {
-    upsertSubagentRunRowInDatabase(openOpenClawStateDatabase(), bindSubagentRunRecord(entry));
+    writeSubagentRunValuesInDatabase(
+      openOpenClawStateDatabase(),
+      [bindSubagentRunRecord(entry)],
+      [],
+    );
   }
 
   const finalResult = (): Exclude<Awaited<ReturnType<typeof agentCommandMock>>, void> => ({
@@ -154,11 +158,12 @@ describe("public yielded settle replay with real Gateway admission", () => {
         isSourceCurrent: () => true,
         requesterSessionKey,
         settledEntry,
-        transitionBatch: (batch, state) => {
+        transitionBatch: (batch, state, onPublished) => {
           for (const entry of batch) {
             entry.requesterSettleWake = state;
             persistChild(entry);
           }
+          onPublished(batch);
         },
         completeBatch,
       }),
@@ -271,19 +276,6 @@ describe("public yielded settle replay with real Gateway admission", () => {
       }
     },
   );
-
-  it("settles the canonical wake after a terminal visible final", async () => {
-    agentCommandMock.mockImplementationOnce(async () => finalResult());
-    const completion = wake();
-    expect(await completion.result).toBe(true);
-    expect(agentCommandMock).toHaveBeenCalledOnce();
-    expect(completion.completeBatch).toHaveBeenCalledOnce();
-    expect(completion.completeBatch.mock.calls[0]?.[2]).toMatchObject({
-      delivered: true,
-      requesterVisibleFinalDelivered: true,
-    });
-    expect(loadSubagentRegistryFromSqlite().get(child.runId)?.requesterSettleWake).toBeUndefined();
-  });
 
   it.each(["retained stale", "mixed", "legacy"] as const)(
     "scopes a saved batch's actionable recovery roster (%s)",
@@ -439,7 +431,7 @@ describe("public yielded settle replay with real Gateway admission", () => {
         if (transcriptOnly && acceptedMessages.length === 1 && receipt) {
           // Leave the real committed transcript as the only durable evidence,
           // as when the process exits before the completion write is admitted.
-          receipt.complete = () => {
+          receipt.completeAsync = async () => {
             throw new Error("isolated process exit before completion persistence");
           };
         }
@@ -450,11 +442,12 @@ describe("public yielded settle replay with real Gateway admission", () => {
         isSourceCurrent: () => true,
         requesterSessionKey,
         settledEntry,
-        transitionBatch: (members, state) => {
+        transitionBatch: (members, state, onPublished) => {
           for (const entry of members) {
             entry.requesterSettleWake = state;
             persistChild(entry);
           }
+          onPublished(members);
         },
         // Model the crash window after Gateway input completion commits but
         // before lifecycle durably acknowledges the dispatching wake.

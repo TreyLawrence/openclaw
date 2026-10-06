@@ -4,6 +4,7 @@ import type { GatewayRequestHandlers } from "../gateway/server-methods/types.js"
 import type { InternalHookHandler } from "../hooks/internal-hook-types.js";
 import type { HookEntry } from "../hooks/types.js";
 import type { JsonSchemaObject } from "../shared/json-schema.types.js";
+import type { AgentExecutorController } from "./agent-executor-controller.types.js";
 import type {
   AgentToolResultMiddleware,
   AgentToolResultMiddlewareRuntime,
@@ -64,7 +65,7 @@ import type {
   PluginMcpServerConnectionResolverRegistration,
   PluginMcpServerRequestHeaderProviderRegistration,
 } from "./types.mcp-connection.js";
-type ChannelPlugin = import("../channels/plugins/types.plugin.js").ChannelPlugin;
+type AnyChannelPlugin = import("../channels/plugins/types.plugin.js").AnyChannelPlugin;
 type CliBackendPlugin = import("./types.js").CliBackendPlugin;
 type ImageGenerationProviderPlugin = import("./types.js").ImageGenerationProviderPlugin;
 type MediaUnderstandingProviderPlugin = import("./types.js").MediaUnderstandingProviderPlugin;
@@ -84,6 +85,7 @@ type OpenClawPluginReloadRegistration = import("./types.js").OpenClawPluginReloa
 type OpenClawPluginSecurityAuditCollector =
   import("./types.js").OpenClawPluginSecurityAuditCollector;
 type OpenClawPluginService = import("./types.js").OpenClawPluginService;
+type OpenClawPluginServiceV2 = import("./types.js").OpenClawPluginServiceV2;
 type OpenClawPluginToolFactory = import("./types.js").OpenClawPluginToolFactory;
 type PluginConversationBindingResolvedEvent =
   import("./types.js").PluginConversationBindingResolvedEvent;
@@ -163,7 +165,7 @@ type PluginHostedMediaResolverRegistration = PluginRegistrationOwner & {
 };
 
 export type PluginChannelRegistration = PluginRegistrationOwner & {
-  plugin: ChannelPlugin;
+  plugin: AnyChannelPlugin;
   /** Prepared views retain the exact transport donor in addition to their local admission. */
   borrowedRuntimeRecord?: PluginRecord;
   /** Exact record-bound runtime resolver captured when the active plugin registered the channel. */
@@ -175,7 +177,7 @@ export type PluginChannelRegistration = PluginRegistrationOwner & {
 };
 
 type PluginChannelSetupRegistration = PluginRegistrationOwner & {
-  plugin: ChannelPlugin;
+  plugin: AnyChannelPlugin;
   /** Loader-owned provenance. Missing values are conservative legacy registrations. */
   origin?: PluginOrigin;
   enabled: boolean;
@@ -242,7 +244,7 @@ type PluginHookRegistration = {
 
 export type PluginServiceRegistration = PluginRegistrationOwner & {
   readonly id: string;
-  service: OpenClawPluginService;
+  service: OpenClawPluginService | OpenClawPluginServiceV2;
   origin: PluginOrigin;
   trustedOfficialInstall?: boolean;
 };
@@ -411,6 +413,12 @@ export type PluginRecord = {
   dependencyStatus?: PluginDependencyStatus;
 };
 
+/** The Gateway registry owner that admitted work in a registry generation. */
+export type PluginRegistryGatewayOwner = {
+  /** The owner's published registry while it stays open; closing owners return undefined. */
+  readonly current: () => PluginRegistry | undefined;
+};
+
 export type PluginRegistry = {
   plugins: PluginRecord[];
   tools: PluginToolRegistration[];
@@ -441,6 +449,10 @@ export type PluginRegistry = {
   agentToolResultMiddlewareOwners: PluginAgentToolResultMiddlewareOwner[];
   agentToolResultMiddlewares: PluginAgentToolResultMiddlewareRegistration[];
   agentHarnesses: PluginAgentHarnessRegistration[];
+  agentExecutorControllers: Map<
+    string,
+    PluginRegistrationOwner & { controller: AgentExecutorController }
+  >;
   pluginRuntimeArtifacts: Map<string, ResolvedPluginRuntimeArtifact>;
   compactionProviders: RegisteredCompactionProvider[];
   decisionProviders: Array<{
