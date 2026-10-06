@@ -1,4 +1,10 @@
 /** Model selection state for reply runs, including catalog and override handling. */
+import { buildModelCatalogRef } from "@openclaw/model-catalog-core/model-catalog-refs";
+import {
+  assertAdmittedRunOperatorAuthority,
+  assertOperatorModelAllowed,
+  type AdmittedRunOperatorAuthority,
+} from "../../agents/admitted-run-context.js";
 import {
   hasLegacyAutoFallbackWithoutOrigin,
   resolveAgentConfig,
@@ -12,9 +18,8 @@ import type { ModelCatalogEntry } from "../../agents/model-catalog.js";
 import type { ModelCatalogSnapshot } from "../../agents/model-catalog.types.js";
 import type { ModelFallbackRouteResolution } from "../../agents/model-fallback.types.js";
 import {
-  type ModelAliasIndex,
-  modelKey,
   normalizeProviderId,
+  normalizeModelRef,
   resolveModelAliasFromPair,
   resolveReasoningDefault,
   resolveThinkingDefault,
@@ -29,6 +34,7 @@ import {
   OPENAI_PROVIDER_ID,
   listOpenAIAuthProfileProvidersForAgentRuntime,
 } from "../../agents/openai-routing.js";
+import { resolveOperatorModelDefault } from "../../agents/operator-model-policy.js";
 import {
   needsThinkHydration,
   resolveEffectiveAgentRuntime,
@@ -50,13 +56,9 @@ import type { ThinkLevel } from "../thinking.shared.js";
 import {
   findSelectedCatalogEntry,
   mergePreparedConfiguredCatalog,
-  normalizeRuntimeRef,
   resolveRuntimeNormalization,
 } from "./model-runtime-normalization.js";
-import {
-  isStaleHeartbeatAutoFallbackOverride,
-  resolveStoredRuntimeModelRef,
-} from "./stored-model-override.js";
+import { isStaleHeartbeatAutoFallbackOverride } from "./stored-model-override.js";
 export {
   resolveModelDirectiveSelection,
   type ModelDirectiveSelection,
@@ -76,9 +78,11 @@ type ModelSelectionState = {
   model: string;
   requestedRouteResolution: ModelFallbackRouteResolution;
   modelPolicy: ModelVisibilityPolicy;
+  operatorAuthority?: AdmittedRunOperatorAuthority;
+  /** Caller-only selection; auth resolution must preserve shared session pins. */
+  operatorModelOverride?: boolean;
   allowedModelKeys: Set<string>;
   allowedModelCatalog: ModelCatalog;
-  policyAliasIndex: ModelAliasIndex;
   resetModelOverride: boolean;
   resetModelOverrideRef?: string;
   resetModelOverrideReason?: "disallowed" | "stale" | "temporarily-unavailable";
@@ -91,7 +95,6 @@ type ModelSelectionState = {
   hasConfiguredThinkingDefault?: boolean;
   /** Default reasoning level from model capability: "on" if model has reasoning, else "off". */
   resolveDefaultReasoningLevel: (selection?: ThinkingDefaultSelection) => Promise<"on" | "off">;
-  needsModelCatalog: boolean;
   modelContextWindow?: number;
   modelContextTokens?: number;
 };
@@ -103,18 +106,10 @@ const sessionPersistenceRuntimeLoader = createLazyImportLoader(
   () => import("./session-entry-persistence.js"),
 );
 
-function loadPreparedModelCatalogRuntime() {
-  return modelCatalogRuntimeLoader.load();
-}
-
-function loadSessionPersistenceRuntime() {
-  return sessionPersistenceRuntimeLoader.load();
-}
-
 /** Resolves provider/model, allowlist, catalog, and thinking defaults for a reply run. */
 export async function createModelSelectionState(params: {
   cfg: OpenClawConfig;
-  agentId?: string;
+  agentId: string;
   agentCfg: NonNullable<NonNullable<OpenClawConfig["agents"]>["defaults"]> | undefined;
   sessionEntry?: SessionEntry;
   sessionStore?: Record<string, SessionEntry>;
@@ -128,14 +123,19 @@ export async function createModelSelectionState(params: {
   provider: string;
   model: string;
   hasModelDirective: boolean;
-  hasOneTurnModelOverride?: boolean;
   skipStoredModelOverride?: boolean;
   /** True when heartbeat.model was explicitly resolved for this run.
    *  In that case, skip session-stored overrides so the heartbeat selection wins. */
   hasResolvedHeartbeatModelOverride?: boolean;
   isHeartbeat?: boolean;
   preparedModelCatalog?: ModelCatalogSnapshot;
+  operatorAuthority?: AdmittedRunOperatorAuthority;
 }): Promise<ModelSelectionState> {
+  const operatorAuthority = params.operatorAuthority;
+  if (operatorAuthority) {
+    assertAdmittedRunOperatorAuthority(operatorAuthority);
+    operatorAuthority.assertCurrent();
+  }
   const timingEnabled = isDiagnosticFlagEnabled("ingress.timing", params.cfg);
   const startMs = timingEnabled ? Date.now() : 0;
   const logStage = (stage: string, extra?: string) => {
@@ -161,7 +161,7 @@ export async function createModelSelectionState(params: {
   const loadRuntimeCatalogSnapshot = async (): Promise<ModelCatalogSnapshot> =>
     params.preparedModelCatalog ??
     (await (
-      await loadPreparedModelCatalogRuntime()
+      await modelCatalogRuntimeLoader.load()
     ).loadPreparedModelCatalogSnapshot({
       config: cfg,
       ...(params.agentId ? { agentId: params.agentId } : {}),
@@ -171,22 +171,21 @@ export async function createModelSelectionState(params: {
 
   let provider = params.provider;
   let model = params.model;
-  let requestedRouteResolution: ModelFallbackRouteResolution = "resolved";
-  let resolvedStoredOverrideSelected = false;
   const primaryProvider = params.primaryProvider ?? defaultProvider;
   const primaryModel = params.primaryModel ?? defaultModel;
-  const hasOneTurnModelOverride = params.hasOneTurnModelOverride === true;
   const modelSelectionLocked = sessionEntry?.modelSelectionLocked === true;
   const agentEntry = params.agentId ? resolveAgentConfig(cfg, params.agentId) : undefined;
 
-  let visibilityPolicy: ModelVisibilityPolicy = createModelVisibilityPolicy({
-    cfg,
-    catalog: [],
-    defaultProvider,
-    defaultModel,
-    agentId: params.agentId,
-    ...runtimeModelNormalization,
-  });
+  const createVisibilityPolicy = (catalog: ModelCatalog) =>
+    createModelVisibilityPolicy({
+      cfg,
+      catalog,
+      defaultProvider,
+      defaultModel: { provider: defaultProvider, model: defaultModel },
+      agentId: params.agentId,
+      ...runtimeModelNormalization,
+    });
+  let visibilityPolicy = createVisibilityPolicy([]);
   const hasAllowlist = !visibilityPolicy.allowAny;
   const hasConfiguredModels =
     Object.keys(agentCfg?.models ?? {}).length > 0 ||
@@ -210,12 +209,21 @@ export async function createModelSelectionState(params: {
   // (discovery threw, static/empty fallback) must not destroy a pinned override.
   let catalogAuthoritative = true;
   let resetModelOverride = false;
+  // Refusing a pin for this run does not imply ownership of it or a successful persisted reset.
+  let storedOverrideResetForRun = false;
   let resetModelOverrideRef: string | undefined;
   let resetModelOverrideReason: "disallowed" | "stale" | "temporarily-unavailable" | undefined;
-  const directStoredModelOverride = storedModelOverrides.resolveDirectStoredModelOverride({
+  const effectiveStoredModelOverride = storedModelOverrides.resolveStoredModelOverrideCore({
     sessionEntry,
+    sessionStore,
+    sessionKey,
+    parentSessionKey,
     defaultProvider,
+    allowPluginNormalization: runtimeModelNormalization.allowPluginNormalization,
+    manifestPlugins: runtimeModelNormalization.manifestPlugins,
   });
+  const directStoredModelOverride =
+    effectiveStoredModelOverride?.source === "session" ? effectiveStoredModelOverride : null;
   const primaryHarnessPolicy = resolveAgentHarnessPolicy({
     provider: primaryProvider,
     modelId: primaryModel,
@@ -223,22 +231,16 @@ export async function createModelSelectionState(params: {
     agentId: params.agentId,
     sessionKey,
   });
-  const normalizedCurrentSelection = normalizeRuntimeRef(
-    provider,
-    model,
-    runtimeModelNormalization,
-  );
-  const resolveDirectStoredOverrideState = (
+  const storedOverrideRef = effectiveStoredModelOverride
+    ? {
+        provider: effectiveStoredModelOverride.provider ?? defaultProvider,
+        model: effectiveStoredModelOverride.model,
+      }
+    : undefined;
+  const isStaleStoredOverride = (
     entry: SessionEntry | undefined,
     override: storedModelOverrides.StoredModelOverride | null,
   ) => {
-    const normalizedOverride = override
-      ? normalizeRuntimeRef(
-          override.provider ?? defaultProvider,
-          override.model,
-          runtimeModelNormalization,
-        )
-      : null;
     const staleHeartbeatAutoFallbackOverride = isStaleHeartbeatAutoFallbackOverride({
       isHeartbeat: params.isHeartbeat,
       hasResolvedHeartbeatModelOverride: params.hasResolvedHeartbeatModelOverride,
@@ -255,25 +257,21 @@ export async function createModelSelectionState(params: {
       normalizeProviderId(override.provider ?? "") === OPENAI_CODEX_PROVIDER_ID &&
       normalizeProviderId(primaryProvider) === OPENAI_PROVIDER_ID &&
       primaryHarnessPolicy.runtime === "codex" &&
-      normalizeRuntimeRef(OPENAI_PROVIDER_ID, override.model, runtimeModelNormalization).model ===
-        normalizeRuntimeRef(OPENAI_PROVIDER_ID, primaryModel, runtimeModelNormalization).model;
+      normalizeModelRef(OPENAI_PROVIDER_ID, override.model, runtimeModelNormalization).model ===
+        normalizeModelRef(OPENAI_PROVIDER_ID, primaryModel, runtimeModelNormalization).model;
     // Reapplying the current selection must not fight an explicit override.
     const staleLegacyAutoFallbackWithoutOrigin =
       override?.source === "session" &&
       hasLegacyAutoFallbackWithoutOrigin(entry) &&
-      normalizedOverride !== null &&
-      modelKey(normalizedCurrentSelection.provider, normalizedCurrentSelection.model) !==
-        modelKey(normalizedOverride.provider, normalizedOverride.model);
-    return {
-      normalizedOverride,
-      stale:
-        staleHeartbeatAutoFallbackOverride ||
-        staleLegacyOpenAICodexAutoOverride ||
-        staleLegacyAutoFallbackWithoutOrigin,
-    };
+      (params.provider !== (override.provider ?? defaultProvider) ||
+        params.model !== override.model);
+    return (
+      staleHeartbeatAutoFallbackOverride ||
+      staleLegacyOpenAICodexAutoOverride ||
+      staleLegacyAutoFallbackWithoutOrigin
+    );
   };
-  const { normalizedOverride: normalizedDirectOverride, stale: staleDirectStoredOverride } =
-    resolveDirectStoredOverrideState(sessionEntry, directStoredModelOverride);
+  const staleDirectStoredOverride = isStaleStoredOverride(sessionEntry, directStoredModelOverride);
 
   if (needsModelCatalog) {
     const catalogSnapshot = await loadRuntimeCatalogSnapshot();
@@ -284,14 +282,7 @@ export async function createModelSelectionState(params: {
       "catalog-loaded",
       `entries=${modelCatalog.length} authoritative=${catalogAuthoritative}`,
     );
-    visibilityPolicy = createModelVisibilityPolicy({
-      cfg,
-      catalog: modelCatalog,
-      defaultProvider,
-      defaultModel,
-      agentId: params.agentId,
-      ...runtimeModelNormalization,
-    });
+    visibilityPolicy = createVisibilityPolicy(modelCatalog);
     allowedModelCatalog = visibilityPolicy.allowedCatalog;
     allowedModelKeys = visibilityPolicy.allowedKeys;
     logStage(
@@ -299,14 +290,7 @@ export async function createModelSelectionState(params: {
       `allowed=${allowedModelCatalog.length} keys=${allowedModelKeys.size}`,
     );
   } else if (hasAllowlist || hasConfiguredModels || configuredModelCatalog.length > 0) {
-    visibilityPolicy = createModelVisibilityPolicy({
-      cfg,
-      catalog: configuredModelCatalog,
-      defaultProvider,
-      defaultModel,
-      agentId: params.agentId,
-      ...runtimeModelNormalization,
-    });
+    visibilityPolicy = createVisibilityPolicy(configuredModelCatalog);
     allowedModelCatalog = visibilityPolicy.allowedCatalog;
     allowedModelKeys = visibilityPolicy.allowedKeys;
     logStage(
@@ -319,30 +303,30 @@ export async function createModelSelectionState(params: {
     sessionEntry &&
     sessionStore &&
     sessionKey &&
-    directStoredModelOverride &&
-    !hasOneTurnModelOverride
+    storedOverrideRef &&
+    (effectiveStoredModelOverride?.source === "session" ||
+      (!params.skipStoredModelOverride && !params.hasResolvedHeartbeatModelOverride)) &&
+    (!params.hasModelDirective || !operatorAuthority?.modelPolicy)
   ) {
-    const normalizedOverride = resolveStoredRuntimeModelRef(
-      {
-        ...directStoredModelOverride,
-        provider: directStoredModelOverride.provider ?? defaultProvider,
-      },
-      cfg,
-      sessionEntry,
-      runtimeModelNormalization,
-    );
-    const key = modelKey(normalizedOverride.provider, normalizedOverride.model);
+    const key = buildModelCatalogRef(storedOverrideRef.provider, storedOverrideRef.model);
     const overrideAllowed =
-      hasSessionAutoModelSelection(sessionEntry) || visibilityPolicy.allows(normalizedOverride);
+      (effectiveStoredModelOverride?.source === "session" &&
+        hasSessionAutoModelSelection(sessionEntry)) ||
+      visibilityPolicy.allows(storedOverrideRef);
     // A degraded catalog cannot prove a pin is disallowed. Preserve it while the turn falls back
     // to primary, then re-evaluate after discovery recovers; config-proven stale pins still reset.
     const shouldResetOverride =
       (staleDirectStoredOverride || !overrideAllowed) && !modelSelectionLocked;
     const overrideTemporarilyUnavailable =
       shouldResetOverride && !staleDirectStoredOverride && !catalogAuthoritative;
+    storedOverrideResetForRun = shouldResetOverride;
     if (overrideTemporarilyUnavailable) {
       resetModelOverrideRef = key;
       resetModelOverrideReason = "temporarily-unavailable";
+    } else if (shouldResetOverride && effectiveStoredModelOverride?.source === "parent") {
+      // The child's policy cannot clear the parent's choice.
+      resetModelOverrideRef = key;
+      resetModelOverrideReason = "disallowed";
     } else if (shouldResetOverride) {
       const initialSessionEntry = { ...sessionEntry };
       const nextSessionEntry = { ...sessionEntry };
@@ -354,12 +338,16 @@ export async function createModelSelectionState(params: {
       let resetApplied = updated;
       if (updated) {
         if (storePath) {
-          const { persistReplySessionEntry } = await loadSessionPersistenceRuntime();
+          const { persistReplySessionEntry } = await sessionPersistenceRuntimeLoader.load();
           const persistence = await persistReplySessionEntry({
             storePath,
             sessionKey,
             initialEntry: initialSessionEntry,
             entry: nextSessionEntry,
+            validateCommit: () => {
+              operatorAuthority?.assertCurrent();
+              return undefined;
+            },
           });
           if (persistence.status === "lifecycle-invalidated") {
             throw new SessionWorkStartInvalidatedError(persistence.error);
@@ -383,27 +371,25 @@ export async function createModelSelectionState(params: {
       }
     }
   }
-  if (staleDirectStoredOverride) {
-    const currentSelectionKey = modelKey(
-      normalizedCurrentSelection.provider,
-      normalizedCurrentSelection.model,
-    );
-    const directStoredOverrideKey = normalizedDirectOverride
-      ? modelKey(normalizedDirectOverride.provider, normalizedDirectOverride.model)
-      : undefined;
-    if (currentSelectionKey === directStoredOverrideKey) {
-      provider = primaryProvider;
-      model = primaryModel;
-      requestedRouteResolution = "resolved";
-    }
+  // Resolve refused pins from the primary, not catalog order, even when the pin must be preserved.
+  // Only replace a pin-seeded selection; explicit per-run choices keep their precedence.
+  if (
+    (storedOverrideResetForRun || staleDirectStoredOverride) &&
+    params.provider === storedOverrideRef?.provider &&
+    params.model === storedOverrideRef.model
+  ) {
+    provider = primaryProvider;
+    model = primaryModel;
   }
 
-  const storedOverride = storedModelOverrides.resolveStoredModelOverride({
+  const storedOverride = storedModelOverrides.resolveStoredModelOverrideCore({
     sessionEntry,
     sessionStore,
     sessionKey,
     parentSessionKey,
     defaultProvider,
+    allowPluginNormalization: runtimeModelNormalization.allowPluginNormalization,
+    manifestPlugins: runtimeModelNormalization.manifestPlugins,
   });
   // Skip stored session model override only when an explicit heartbeat.model
   // was resolved. Heartbeats without heartbeat.model still inherit normal
@@ -411,14 +397,13 @@ export async function createModelSelectionState(params: {
   // configured default.
   const skipStoredOverride =
     params.skipStoredModelOverride === true ||
-    hasOneTurnModelOverride ||
     params.hasResolvedHeartbeatModelOverride === true ||
     (resetModelOverride && staleDirectStoredOverride && storedOverride?.source === "session");
   const usesStoredAutomaticSelection =
     !skipStoredOverride &&
     storedOverride?.source === "session" &&
     hasSessionAutoModelSelection(sessionEntry) &&
-    !resolveDirectStoredOverrideState(sessionEntry, storedOverride).stale;
+    !isStaleStoredOverride(sessionEntry, storedOverride);
 
   if (storedOverride?.model && !skipStoredOverride) {
     const storedProvider = storedOverride.provider || defaultProvider;
@@ -440,16 +425,11 @@ export async function createModelSelectionState(params: {
             ...runtimeModelNormalization,
           })
         : null;
-    const normalizedStoredOverride = resolveStoredRuntimeModelRef(
-      {
-        ...storedOverride,
-        provider: storedAlias?.provider ?? storedProvider,
-        model: storedAlias?.model ?? storedOverride.model,
-      },
-      cfg,
-      sessionEntry,
-      runtimeModelNormalization,
-    );
+    // A CLI provider names the execution route; a resume binding must not turn it into an API ref.
+    const normalizedStoredOverride = storedAlias ?? {
+      provider: storedProvider,
+      model: storedOverride.model,
+    };
     if (
       modelSelectionLocked ||
       usesStoredAutomaticSelection ||
@@ -457,39 +437,50 @@ export async function createModelSelectionState(params: {
     ) {
       provider = normalizedStoredOverride.provider;
       model = normalizedStoredOverride.model;
-      requestedRouteResolution =
-        storedAlias || storedRouteCataloged ? "resolved" : storedOverride.routeResolution;
-      resolvedStoredOverrideSelected = storedOverride.routeResolution === "resolved";
     }
   }
 
   const skipResolveSelection =
-    params.hasModelDirective ||
-    hasOneTurnModelOverride ||
-    modelSelectionLocked ||
-    usesStoredAutomaticSelection ||
-    resolvedStoredOverrideSelected;
+    params.hasModelDirective || modelSelectionLocked || usesStoredAutomaticSelection;
   if (!skipResolveSelection) {
-    const unresolvedSelectionKey = modelKey(provider, model);
     const allowedInitialSelection = visibilityPolicy.resolveSelection({
       provider,
       model,
+      routeResolution: "resolved",
     });
     if (!allowedInitialSelection) {
       const policyPath = visibilityPolicy.allowConfigPath ?? "modelPolicy.allow";
       throw new Error(
-        `Configured default model "${modelKey(provider, model)}" is not allowed by ${policyPath}, and no allowed model is available.`,
+        `Configured default model "${buildModelCatalogRef(provider, model)}" is not allowed by ${policyPath}, and no allowed model is available.`,
       );
     }
     provider = allowedInitialSelection.provider;
     model = allowedInitialSelection.model;
-    if (modelKey(provider, model) !== unresolvedSelectionKey) {
-      requestedRouteResolution = "resolved";
+  }
+  let operatorModelOverride = false;
+  if (!params.hasModelDirective) {
+    const selection = modelSelectionLocked
+      ? { provider, model }
+      : resolveOperatorModelDefault({
+          cfg,
+          agentId: params.agentId,
+          manifestPlugins: runtimeModelNormalization.manifestPlugins,
+          policy: operatorAuthority?.modelPolicy,
+          model: { provider, model },
+          allows: visibilityPolicy.allows,
+        });
+    assertOperatorModelAllowed(operatorAuthority, selection);
+    if (!selection) {
+      throw new Error("No model is available for this operator role and agent.");
     }
+    operatorModelOverride = selection.provider !== provider || selection.model !== model;
+    provider = selection.provider;
+    model = selection.model;
   }
 
   if (
     !params.skipStoredModelOverride &&
+    !operatorModelOverride &&
     sessionEntry &&
     sessionStore &&
     sessionKey &&
@@ -533,6 +524,7 @@ export async function createModelSelectionState(params: {
       !profile && isUserModelAuthProfileId(sessionEntry.authProfileOverride);
     if (!overrideStillEligible && !missingPersonalProfile) {
       await clearSessionAuthProfileOverride({
+        agentId: params.agentId,
         sessionEntry,
         sessionStore,
         sessionKey,
@@ -541,15 +533,6 @@ export async function createModelSelectionState(params: {
     }
   }
 
-  const buildThinkingCatalog = (catalog: ModelCatalog): ModelCatalog =>
-    createModelVisibilityPolicy({
-      cfg,
-      catalog,
-      defaultProvider,
-      defaultModel,
-      agentId: params.agentId,
-      ...runtimeModelNormalization,
-    }).catalog;
   const resolveThinkingSelection = (selection: ThinkingDefaultSelection) => {
     const selected = findSelectedCatalogEntry({ ...selection, catalog: visibilityPolicy.catalog });
     return {
@@ -574,14 +557,14 @@ export async function createModelSelectionState(params: {
   ) => {
     const thinkingSelection = resolveThinkingSelection(selection);
     const { agentRuntime } = thinkingSelection;
-    const key = `${modelKey(selection.provider, selection.model)}\0${agentRuntime}`;
+    const key = JSON.stringify([selection.provider, selection.model, agentRuntime]);
     const cached = thinkingCatalogs.get(key);
     if (cached) {
       return cached.length > 0 ? cached : undefined;
     }
     let catalog = visibilityPolicy.catalog;
     if (needsThinkHydration(catalog, selection.provider, selection.model, agentRuntime)) {
-      const { loadProviderScopedThinkingCatalog } = await loadPreparedModelCatalogRuntime();
+      const { loadProviderScopedThinkingCatalog } = await modelCatalogRuntimeLoader.load();
       const preparedCatalog = await loadProviderScopedThinkingCatalog({
         config: cfg,
         agentId: params.agentId,
@@ -591,7 +574,7 @@ export async function createModelSelectionState(params: {
       });
       // An empty refresh cannot replace the admitted owner with a configuration-only row.
       if (findSelectedCatalogEntry({ catalog: preparedCatalog, ...selection })) {
-        catalog = buildThinkingCatalog(preparedCatalog);
+        catalog = createVisibilityPolicy(preparedCatalog).catalog;
       }
     }
     thinkingCatalogs.set(key, catalog);
@@ -603,7 +586,11 @@ export async function createModelSelectionState(params: {
     selection: ThinkingDefaultSelection = { provider, model },
   ) => {
     const thinkingSelection = resolveThinkingSelection(selection);
-    const cacheKey = `${modelKey(selection.provider, selection.model)}\0${thinkingSelection.agentRuntime}`;
+    const cacheKey = JSON.stringify([
+      selection.provider,
+      selection.model,
+      thinkingSelection.agentRuntime,
+    ]);
     const cached = defaultThinkingLevels.get(cacheKey);
     if (cached) {
       return cached;
@@ -643,11 +630,12 @@ export async function createModelSelectionState(params: {
   return {
     provider,
     model,
-    requestedRouteResolution,
+    requestedRouteResolution: "resolved",
     modelPolicy: visibilityPolicy,
+    ...(operatorAuthority ? { operatorAuthority } : {}),
+    ...(operatorModelOverride ? { operatorModelOverride } : {}),
     allowedModelKeys,
     allowedModelCatalog,
-    policyAliasIndex: visibilityPolicy.policyAliasIndex,
     resetModelOverride,
     resetModelOverrideRef,
     resetModelOverrideReason,
@@ -657,7 +645,6 @@ export async function createModelSelectionState(params: {
     resolveDefaultThinkingLevel,
     hasConfiguredThinkingDefault,
     resolveDefaultReasoningLevel,
-    needsModelCatalog,
     modelContextWindow: selectedCatalogEntry?.contextWindow,
     modelContextTokens: selectedCatalogEntry?.contextTokens,
   };

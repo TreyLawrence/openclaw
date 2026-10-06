@@ -21,6 +21,7 @@ export type RunPluginInstallCommandParams = {
     acknowledgeInstallPolicyWarning?: boolean;
     dangerouslyForceUnsafeInstall?: boolean;
     force?: boolean;
+    enable?: boolean;
     link?: boolean;
     pin?: boolean;
     marketplace?: string;
@@ -44,7 +45,7 @@ type ResolvedPluginInstallRequest = {
   request: PluginInstallRequestContext;
 };
 
-export type PluginInstallPreflight =
+type PluginInstallPreflight =
   | { ok: false; error: string }
   | (ResolvedPluginInstallRequest & {
       ok: true;

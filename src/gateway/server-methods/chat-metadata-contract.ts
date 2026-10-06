@@ -1,29 +1,35 @@
 import type { ModelChoice } from "../../../packages/gateway-protocol/src/schema/agents-models-skills.js";
+import type { ModelsListResult } from "../../../packages/gateway-protocol/src/schema/model-catalog.js";
 import type { ChatAccountSelection } from "../../../packages/gateway-protocol/src/schema/users.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
+import type { CurrentReadAuthority } from "../../shared/current-read-authority.js";
 import type { UserModelAccountSelection } from "../model-account-authority.js";
 
+export const chatMetadataSessionFields = [
+  "sessionId",
+  "lifecycleRevision",
+  "sessionStartedAt",
+  "agentHarnessId",
+  "agentRuntimeOverride",
+  "modelSelectionLocked",
+  "pluginOwnerId",
+  "providerOverride",
+  "modelOverride",
+  "modelOverrideRouteResolution",
+  "modelOverrideFallbackOriginProvider",
+  "modelOverrideFallbackOriginModel",
+  "authProfileOverride",
+  "authProfileOverrideSource",
+  "authProfileOverrideCompactionCount",
+] as const satisfies readonly (keyof SessionEntry)[];
+
 export type ChatMetadataSessionEntry = Partial<
-  Pick<
-    SessionEntry,
-    | "sessionId"
-    | "lifecycleRevision"
-    | "sessionStartedAt"
-    | "acp"
-    | "agentHarnessId"
-    | "agentRuntimeOverride"
-    | "modelSelectionLocked"
-    | "pluginOwnerId"
-    | "providerOverride"
-    | "modelOverride"
-    | "authProfileOverride"
-    | "authProfileOverrideSource"
-    | "authProfileOverrideCompactionCount"
-  >
+  Pick<SessionEntry, (typeof chatMetadataSessionFields)[number]>
 >;
 
 export type ChatMetadataReadParams = {
   agentId: string;
+  includeModels?: boolean;
   sessionKey?: string;
   storePath?: string;
   requesterProfileId?: string;
@@ -31,6 +37,10 @@ export type ChatMetadataReadParams = {
   /** Saved reads retain their selected row and physical store until response settlement. */
   isCurrent?: () => boolean;
   assertCurrent?: () => void;
+  /** Refresh saved-session authority and begin preparation before yielding again. */
+  withCurrent?: CurrentReadAuthority["withCurrent"];
+  /** Synchronous saved-session authority at credential-bearing provider dispatch. */
+  beforeRequest?: () => void;
   release?: () => void;
   draftAccountSelection?: UserModelAccountSelection;
 };
@@ -38,6 +48,7 @@ export type ChatMetadataReadParams = {
 export type ChatMetadataResult = {
   commands?: unknown[];
   models?: ModelChoice[];
+  modelSelectionPolicy?: ModelsListResult["modelSelectionPolicy"];
   swarmEnabled: boolean;
   runtimeSelectionLocked?: boolean;
   accountSelection?: ChatAccountSelection;

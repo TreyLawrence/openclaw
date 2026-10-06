@@ -21,6 +21,7 @@ function createLaneController(params: {
   globalLane?: string;
   runId: string;
   enqueue?: CommandQueueEnqueueFn;
+  runOverrides?: Partial<LaneTestParams>;
 }) {
   let runParams: LaneTestParams = {
     sessionId: params.runId,
@@ -30,6 +31,7 @@ function createLaneController(params: {
     timeoutMs: 1,
     runId: params.runId,
     trigger: "user",
+    ...params.runOverrides,
     ...(params.enqueue ? { enqueue: params.enqueue } : {}),
   };
   let lifecycleGeneration = getAgentEventLifecycleGeneration();
@@ -79,6 +81,7 @@ describe("embedded run session lane", () => {
 
     await expect(controller.enqueueSession(async () => "finished")).resolves.toBe("finished");
     expect(observedOptions).toMatchObject({
+      taskIdentity: { taskKind: "turn", runId: "injected-session-deadline" },
       priority: "foreground",
       taskTimeoutMs: 30_001,
       taskTimeoutAbortGraceMs: 30_000,
@@ -87,6 +90,39 @@ describe("embedded run session lane", () => {
     });
     expect(observedOptions?.taskTimeoutProgressAtMs?.()).toEqual(expect.any(Number));
   });
+
+  it.each(["enqueueSession", "enqueueGlobal"] as const)(
+    "passes available run identity through %s before admission",
+    async (enqueueMethod) => {
+      for (const trigger of ["user", "cron"] as const) {
+        let observedOptions: Parameters<CommandQueueEnqueueFn>[1];
+        const refused = new Error("queue admission refused");
+        const controller = createLaneController({
+          sessionLane: "test:identity-session",
+          runId: "child-run",
+          runOverrides: {
+            trigger,
+            sessionKey: "agent:example:subagent:child",
+            spawnedBy: "agent:example:main",
+          },
+          enqueue: async (_task, options) => {
+            observedOptions = options;
+            throw refused;
+          },
+        });
+
+        await expect(
+          controller[enqueueMethod](async () => ({ meta: { durationMs: 1 } })),
+        ).rejects.toBe(refused);
+        expect(observedOptions?.taskIdentity).toEqual({
+          taskKind: trigger === "cron" ? "cron" : "spawn",
+          sessionKey: "agent:example:subagent:child",
+          runId: "child-run",
+          requesterSessionKey: "agent:example:main",
+        });
+      }
+    },
+  );
 
   it.each(["deadline", "release"] as const)(
     "releases all queued session turns when the active turn reaches its %s",
@@ -215,12 +251,17 @@ describe("embedded run session lane", () => {
     }
   });
 
-  it("times out a stalled global task while another global admission keeps the session alive", async () => {
+  it("keeps a session alive while another run's stalled global task times out", async () => {
     const sessionLane = "test:session-stalled-global-with-successor";
     const globalLane = "test:stalled-global-with-successor";
     setCommandLaneConcurrency(globalLane, 1);
 
     const stalledGlobalTaskStarted = createDeferred();
+    const stalledController = createLaneController({
+      sessionLane: "test:stalled-global-owner",
+      globalLane,
+      runId: "stalled-global-owner",
+    });
     const controller = createLaneController({
       sessionLane,
       globalLane,
@@ -228,7 +269,7 @@ describe("embedded run session lane", () => {
     });
     const run = controller.enqueueSession(
       async () => {
-        const stalledGlobalAdmission = controller.enqueueGlobal(
+        const stalledGlobalAdmission = stalledController.enqueueGlobal(
           async () => {
             stalledGlobalTaskStarted.resolve();
             return await new Promise<never>(() => {});
@@ -254,6 +295,8 @@ describe("embedded run session lane", () => {
     await expectLaneCounts(globalLane, 1, 1);
 
     await completedRun;
+    expect(stalledController.abortSignal.aborted).toBe(true);
+    expect(controller.abortSignal.aborted).toBe(false);
     await expectLaneCounts(sessionLane, 0, 0);
     await expectLaneCounts(globalLane, 0, 0);
   });
