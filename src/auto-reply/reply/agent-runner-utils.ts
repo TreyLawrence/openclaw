@@ -32,7 +32,6 @@ import {
   mintMessageActionTurnCapability,
   resolveMessageActionTurnCapabilityLifetime,
 } from "../../gateway/message-action-turn-capability.js";
-import { getActiveSecretsRuntimeConfigSnapshot } from "../../secrets/runtime-state.js";
 import { isInternalMessageChannel } from "../../utils/message-channel.js";
 import type { TemplateContext } from "../templating.js";
 import { resolveRunAuthProfile } from "./agent-runner-auth-profile.js";
@@ -84,25 +83,13 @@ export async function resolveQueuedReplyExecutionConfig(
   },
 ): Promise<OpenClawConfig> {
   const runtimeConfig = resolveQueuedReplyRuntimeConfig(config);
-  // Gateway activation already resolved these bytes for the model catalog owner.
-  // Command-scoped resolution can materialize other refs and split that generation,
-  // so the activated snapshot skips only that stage — the channel/account-scoped
-  // resolution below still runs, keeping cold-account rejection intact. Healthy
-  // accounts leave no scoped targets in activated bytes, so identity is preserved.
-  // Auth-only and unrecorded snapshots carry config bytes without config-ref
-  // preparation authority; only a snapshot that classified its SecretRef owners
-  // may skip strict command resolution.
-  const activeSnapshot = getActiveSecretsRuntimeConfigSnapshot();
-  let baseResolvedConfig = runtimeConfig;
-  if (!(activeSnapshot?.configRefsPrepared === true && runtimeConfig === activeSnapshot.config)) {
-    const { resolvedConfig } = await resolveCommandSecretRefsViaGateway({
-      config: runtimeConfig,
-      commandName: "reply",
-      targetIds: getAgentRuntimeCommandSecretTargetIds({ config: runtimeConfig }),
-      optionalActivePaths: getAgentRuntimeOptionalCommandSecretPaths(runtimeConfig),
-    });
-    baseResolvedConfig = resolvedConfig ?? runtimeConfig;
-  }
+  const { resolvedConfig } = await resolveCommandSecretRefsViaGateway({
+    config: runtimeConfig,
+    commandName: "reply",
+    targetIds: getAgentRuntimeCommandSecretTargetIds({ config: runtimeConfig }),
+    optionalActivePaths: getAgentRuntimeOptionalCommandSecretPaths(runtimeConfig),
+  });
+  const baseResolvedConfig = resolvedConfig ?? runtimeConfig;
 
   const scope = resolveMessageSecretScope({
     channel: params?.originatingChannel,

@@ -34,19 +34,6 @@ vi.mock("../../secrets/runtime-state.js", async (importOriginal) => ({
     configRefsPrepared: true,
   }),
 }));
-vi.mock("../../cli/command-secret-gateway.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../cli/command-secret-gateway.js")>()),
-  resolveCommandSecretRefsViaGateway: async ({ config }: { config: OpenClawConfig }) => ({
-    resolvedConfig: { ...config, skills: { entries: { example: { apiKey: "command-key" } } } },
-  }),
-}));
-vi.mock("../../cli/command-secret-targets.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../cli/command-secret-targets.js")>()),
-  getAgentRuntimeCommandSecretTargetIds: () => new Set(["skills.entries.*.apiKey"]),
-  getAgentRuntimeOptionalCommandSecretPaths: () => new Set(),
-  getScopedChannelsCommandSecretTargets: () => ({ targetIds: new Set() }),
-}));
-
 let state: OpenClawTestState;
 
 beforeEach(async () => {

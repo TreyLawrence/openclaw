@@ -20,13 +20,24 @@ vi.mock("../../cli/command-secret-gateway.js", () => ({
     hoisted.resolveCommandSecretRefsViaGatewayMock(...args),
 }));
 
-vi.mock("../../cli/command-secret-targets.js", () => ({
-  getAgentRuntimeCommandSecretTargetIds: () => new Set(["skills.entries.*.apiKey"]),
-  getAgentRuntimeOptionalCommandSecretPaths: () =>
-    new Set(["plugins.entries.firecrawl.config.webFetch.apiKey"]),
-  getScopedChannelsCommandSecretTargets: (...args: unknown[]) =>
-    hoisted.getScopedChannelsCommandSecretTargetsMock(...args),
-}));
+vi.mock("../../cli/command-secret-targets.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../cli/command-secret-targets.js")>();
+  return {
+    ...actual,
+    // The real owner decides whether a prepared snapshot already covers the config;
+    // unprepared configs narrow to one fixture target.
+    getAgentRuntimeCommandSecretTargetIds: (
+      params: Parameters<typeof actual.getAgentRuntimeCommandSecretTargetIds>[0],
+    ) =>
+      actual.getAgentRuntimeCommandSecretTargetIds(params).size === 0
+        ? new Set<string>()
+        : new Set(["skills.entries.*.apiKey"]),
+    getAgentRuntimeOptionalCommandSecretPaths: () =>
+      new Set(["plugins.entries.firecrawl.config.webFetch.apiKey"]),
+    getScopedChannelsCommandSecretTargets: (...args: unknown[]) =>
+      hoisted.getScopedChannelsCommandSecretTargetsMock(...args),
+  };
+});
 
 const { resolveQueuedReplyExecutionConfig, resolveQueuedReplyRuntimeConfig } =
   await import("./agent-runner-utils.js");
@@ -247,9 +258,15 @@ describe("resolveQueuedReplyExecutionConfig channel scope", () => {
     const runtimeConfig = activateRuntime(sourceConfig, {
       skills: { entries: { example: { apiKey: "activated-key" } } },
     });
-    hoisted.resolveCommandSecretRefsViaGatewayMock.mockResolvedValue({
-      resolvedConfig: { skills: { entries: { example: { apiKey: "command-key" } } } },
-    });
+    // Mirrors the gateway: refs are materialized only for nonempty target sets.
+    hoisted.resolveCommandSecretRefsViaGatewayMock.mockImplementation(
+      async ({ config, targetIds }: ResolveCommandSecretRefsCall) => ({
+        resolvedConfig:
+          targetIds?.size === 0
+            ? config
+            : { skills: { entries: { example: { apiKey: "command-key" } } } },
+      }),
+    );
 
     // Healthy activated bytes leave no scoped channel targets to resolve.
     hoisted.getScopedChannelsCommandSecretTargetsMock.mockReturnValue({ targetIds: new Set() });
@@ -260,10 +277,13 @@ describe("resolveQueuedReplyExecutionConfig channel scope", () => {
       expect(resolved).toBe(runtimeConfig);
       expect(JSON.stringify(resolved)).toBe(JSON.stringify(runtimeConfig));
     }
-    expect(hoisted.resolveCommandSecretRefsViaGatewayMock).not.toHaveBeenCalled();
+    // The prepared snapshot leaves the shared owner no command targets to resolve.
+    for (const [call] of hoisted.resolveCommandSecretRefsViaGatewayMock.mock.calls) {
+      expect((call as ResolveCommandSecretRefsCall).targetIds).toEqual(new Set());
+    }
   });
 
-  it("keeps cold channel-account resolution on the activated fast path", async () => {
+  it("keeps cold channel-account resolution for activated configs", async () => {
     const sourceConfig: OpenClawConfig = {
       skills: {
         entries: {
@@ -280,17 +300,20 @@ describe("resolveQueuedReplyExecutionConfig channel scope", () => {
       ...runtimeConfig,
       channels: { discord: { accounts: { work: { token: "scoped-token" } } } },
     };
-    hoisted.resolveCommandSecretRefsViaGatewayMock.mockResolvedValue({
-      resolvedConfig: scopedResolved,
-    });
+    hoisted.resolveCommandSecretRefsViaGatewayMock.mockImplementation(
+      async ({ config, targetIds }: ResolveCommandSecretRefsCall) => ({
+        resolvedConfig: targetIds?.size === 0 ? config : scopedResolved,
+      }),
+    );
     const resolved = await resolveQueuedReplyExecutionConfig(runtimeConfig, {
       originatingChannel: "discord",
       originatingAccountId: "work",
     });
     expect(resolved).toBe(scopedResolved);
-    expect(hoisted.resolveCommandSecretRefsViaGatewayMock).toHaveBeenCalledTimes(1);
-    expect(resolveCommandSecretRefsCall(0).config).toBe(runtimeConfig);
-    expect(resolveCommandSecretRefsCall(0).targetIds).toEqual(new Set(["channels.discord.token"]));
+    expect(hoisted.resolveCommandSecretRefsViaGatewayMock).toHaveBeenCalledTimes(2);
+    expect(resolveCommandSecretRefsCall(0).targetIds).toEqual(new Set());
+    expect(resolveCommandSecretRefsCall(1).config).toBe(runtimeConfig);
+    expect(resolveCommandSecretRefsCall(1).targetIds).toEqual(new Set(["channels.discord.token"]));
   });
 
   it("adopts a new runtime generation for a previously queued config while preserving explicit overrides", async () => {
