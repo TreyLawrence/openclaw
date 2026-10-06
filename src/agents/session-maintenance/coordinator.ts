@@ -1,5 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createAbortError, racePromiseWithAbortSignal } from "../../infra/abort-signal.js";
+import {
+  createAbortError,
+  isAbortError,
+  racePromiseWithAbortSignal,
+} from "../../infra/abort-signal.js";
 import {
   assertAgentRunLifecycleGenerationCurrent,
   getAgentEventLifecycleGeneration,
@@ -218,6 +222,24 @@ export async function beginForegroundSessionMaintenance(
   } catch (error) {
     // Only this waiter's reservation ends. Writers retain their tracked completion.
     release();
+    throw error;
+  }
+}
+
+/**
+ * Reserve foreground for a caller whose Stop should end admission quietly: a Stop
+ * during the wait yields no reservation, while a genuine maintenance failure throws.
+ */
+export async function reserveForegroundUnlessStopped(
+  sessionKey: string | undefined,
+  abortSignal: AbortSignal | undefined,
+): Promise<(() => void) | undefined> {
+  try {
+    return await beginForegroundSessionMaintenance(sessionKey, abortSignal);
+  } catch (error) {
+    if (isAbortError(error) && abortSignal?.aborted) {
+      return undefined;
+    }
     throw error;
   }
 }

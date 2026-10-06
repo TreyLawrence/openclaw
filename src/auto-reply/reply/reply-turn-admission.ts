@@ -9,7 +9,7 @@ import {
   type MainSessionRecoveryOwnerLease,
 } from "../../agents/main-session-recovery/main-session-recovery-store.js";
 import { isAgentRunRestartAbortReason } from "../../agents/run-termination.js";
-import { beginForegroundSessionMaintenance } from "../../agents/session-maintenance/coordinator.js";
+import { reserveForegroundUnlessStopped } from "../../agents/session-maintenance/coordinator.js";
 import {
   isRestartRecoveryTombstone,
   SessionWorkStartChangedError,
@@ -23,7 +23,7 @@ import { normalizeStoreSessionKey } from "../../config/sessions/store-entry.js";
 import type { InternalSessionEntry, SessionEntry } from "../../config/sessions/types.js";
 import type { GatewayRecoveryRuntime } from "../../gateway/server-instance-runtime.types.js";
 import type { GatewayContextResolver } from "../../gateway/server-methods/types.js";
-import { isAbortError, racePromiseWithAbortSignal } from "../../infra/abort-signal.js";
+import { racePromiseWithAbortSignal } from "../../infra/abort-signal.js";
 import { getAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
@@ -178,23 +178,12 @@ export async function admitReplyTurn(
 ): Promise<ReplyTurnAdmission> {
   const workSignal = getAsyncWorkSignal();
   const activeAtAdmission = replyRunRegistry.get(params.sessionKey);
-  let releaseForeground: (() => void) | undefined;
-  if (params.kind === "visible") {
-    try {
-      releaseForeground = await beginForegroundSessionMaintenance(
-        params.sessionKey,
-        params.upstreamAbortSignal,
-      );
-    } catch (error) {
-      // A caller Stop during the maintenance wait ends only this admission; the
-      // maintenance writer keeps its own tracked completion. A genuine
-      // maintenance failure still surfaces.
-      if (!isAbortError(error)) {
-        throw error;
-      }
-      return { status: "skipped", reason: "aborted" };
-    }
-  }
+  // A Stop during the maintenance wait reserves nothing; the admission loop's
+  // first check then reports it as aborted. Maintenance failures still throw.
+  const releaseForeground =
+    params.kind === "visible"
+      ? await reserveForegroundUnlessStopped(params.sessionKey, params.upstreamAbortSignal)
+      : undefined;
   let foregroundTransferred = false;
   // Maintenance may finish after the observed reply rotates and clears its slot.
   let sessionId = activeAtAdmission?.result ? activeAtAdmission.sessionId : params.sessionId;
