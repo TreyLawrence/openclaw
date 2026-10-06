@@ -213,10 +213,7 @@ export async function beginForegroundSessionMaintenance(
     owner.controller.abort(createAbortError("Session maintenance yielded to a foreground turn"));
   }
   try {
-    await racePromiseWithAbortSignal(
-      Promise.all(existing.map((owner) => owner.done)),
-      abortSignal,
-    );
+    await racePromiseWithAbortSignal(Promise.all(existing.map((owner) => owner.done)), abortSignal);
     return release;
   } catch (error) {
     // Only this waiter's reservation ends. Writers retain their tracked completion.
