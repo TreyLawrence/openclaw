@@ -221,7 +221,7 @@ describe("PR #148895 real runtime proof", () => {
               skipBootstrap: true,
               model: { primary: provider.modelRef },
             },
-            entries: { main: { default: true } },
+            entries: { main: {} },
           },
           models: { mode: "replace", providers: { [provider.providerId]: provider.config } },
           gateway: { auth: { mode: "token", token: TOKEN } },
