@@ -2478,7 +2478,7 @@ if [ "$SCENARIO" = "workshop-doctor-recovery" ]; then
   phase assert-workshop-candidate-repair node scripts/e2e/lib/upgrade-survivor/workshop-doctor-recovery.mjs doctor "$workshop_doctor_observation_root" candidate
   phase assert-workshop-recovery node scripts/e2e/lib/upgrade-survivor/workshop-doctor-recovery.mjs complete
   run_completed="1"
-  echo "Workshop Doctor recovery passed: published updater refused unchanged malformed state; explicit baseline Doctor, recovered upgrade, and explicit candidate Doctor succeeded."
+  echo "Workshop Doctor recovery passed: published updater refused unchanged malformed state; explicit baseline Doctor repaired it; the recovered upgrade exported pending proposal drafts and retired proposal storage; explicit candidate Doctor repaired and retired restored legacy state."
   exit 0
 fi
 if [ "$SCENARIO" = "custom-plugin-siblings" ]; then
@@ -2618,7 +2618,16 @@ fi
 if [ "$native_assignment_enabled" = "1" ]; then
   phase capture-native-assignment-input node scripts/e2e/lib/upgrade-survivor/native-assignments.mjs before-update
 fi
+if [ "$SCENARIO" = "legacy-operator-state" ]; then
+  # Seed after baseline CLI work so only the published update can consume this legacy input.
+  phase seed-legacy-pending-delivery node scripts/e2e/lib/upgrade-survivor/assertions.mjs \
+    seed-legacy-operator-pending-delivery
+fi
 phase update-candidate update_candidate_for_install_mode
+if [ "$SCENARIO" = "legacy-operator-state" ]; then
+  phase assert-legacy-pending-delivery node scripts/e2e/lib/upgrade-survivor/assertions.mjs \
+    assert-legacy-operator-pending-delivery "$UPDATE_JSON" "$UPDATE_ERR"
+fi
 if [ "$native_assignment_enabled" = "1" ]; then
   phase assert-native-assignment-first-hop node scripts/e2e/lib/upgrade-survivor/native-assignments.mjs post-update "$candidate_version"
 fi

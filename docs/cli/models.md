@@ -39,6 +39,8 @@ For `models status`, `OPENCLAW_AGENT_DIR` overrides the inspected auth directory
 
 Default-model, alias, and fallback changes resolve provider-owned model aliases using the current plugin configuration. When stored entries resolve to the selected model, their settings move to its canonical key; existing canonical settings take precedence. Adding an alias replaces the model's previous alias. If config changes during that preparation, the command rejects the write; rerun it against the updated config.
 
+An explicit `provider/model` that matches a configured provider model keeps its literal identity, even when another model has a colliding alias. Bare aliases and noncolliding `provider/alias` selections still resolve normally.
+
 ### Status
 
 Bare `openclaw models` is equivalent to `openclaw models status`.
@@ -253,6 +255,8 @@ Options:
 - `--json`
 
 Numeric scan options reject empty and whitespace-only values. Omit a flag to retain its default behavior.
+
+A probed scan writes config, even without `--set-default`. It replaces `agents.defaults.model.fallbacks` with the selected models, replaces `agents.defaults.imageModel.fallbacks` when image-capable models are selected, and adds the selected models to `agents.defaults.models`. `--set-default` and `--set-image` additionally set the matching primary. `--json` still writes. Use `--no-probe` to inspect candidates without changing config.
 
 `--set-default` and `--set-image` require live checks; metadata-only scan results are informational and are not applied to config.
 
