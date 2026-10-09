@@ -114,16 +114,14 @@ class ChatOutboxRecovery extends LitElement {
       }
       this.entries = recovery?.entries ?? [];
       this.error = retirementError || (recovery?.blocked ? t("chat.outboxRecoveryFull") : "");
-      if (owner) {
-        const result = await (await draftStore).prepareDurableComposerRecovery(owner);
-        if (generation !== this.generation || !this.isConnected) {
-          return;
-        }
-        if (result.status === "storage-failed") {
-          throw new Error("storage-failed");
-        }
-        this.drafts = result.entries;
+      const result = await (await draftStore).prepareDurableComposerRecovery(owner);
+      if (generation !== this.generation || !this.isConnected) {
+        return;
       }
+      if (result.status === "storage-failed") {
+        throw new Error("storage-failed");
+      }
+      this.drafts = result.entries;
     } catch {
       if (generation !== this.generation || !this.isConnected) {
         return;
@@ -246,8 +244,7 @@ class ChatOutboxRecovery extends LitElement {
     if (attachments.length) {
       return t("chat.outboxRecoveryAttachments", { files: attachments.join(", ") });
     }
-    const goal = "id" in entry ? entry.session.goalMode : entry.goalMode;
-    const reply = "id" in entry ? entry.session.replyTarget : entry.replyTarget;
+    const { goalMode: goal, replyTarget: reply } = "id" in entry ? entry.session : entry;
     if (goal) {
       return t("chat.outboxRecoveryGoal");
     }
@@ -267,8 +264,7 @@ class ChatOutboxRecovery extends LitElement {
   private details(entry: RecoveryEntry) {
     const session = "id" in entry ? entry.session : null;
     const text = "id" in entry ? entry.session.draft : entry.text;
-    const goal = "id" in entry ? entry.session.goalMode : entry.goalMode;
-    const reply = "id" in entry ? entry.session.replyTarget : entry.replyTarget;
+    const { goalMode: goal, replyTarget: reply } = "id" in entry ? entry.session : entry;
     const attachmentNames = "id" in entry ? [] : entry.attachmentNames;
     return [
       text?.trim(),
@@ -395,20 +391,18 @@ class ChatOutboxRecovery extends LitElement {
           : nothing
       }
       <div class="chat-outbox-recovery__actions">
-        <button
-          class="btn btn--sm"
-          ?disabled=${this.busy || !this.owner()}
-          @click=${() => void this.recover(entry)}
-        >
-          ${t("chat.outboxRecoveryRestore")}
-        </button>
-        <button
-          class="btn btn--sm"
-          ?disabled=${this.busy || !this.owner()}
-          @click=${() => void this.discard(entry)}
-        >
-          ${t("chat.outboxRecoveryDelete")}
-        </button>
+        ${(
+          [
+            ["chat.outboxRecoveryRestore", () => void this.recover(entry)],
+            ["chat.outboxRecoveryDelete", () => void this.discard(entry)],
+          ] as const
+        ).map(
+          ([label, action]) => html`
+            <button class="btn btn--sm" ?disabled=${this.busy || !this.owner()} @click=${action}>
+              ${t(label)}
+            </button>
+          `,
+        )}
       </div>
     </div>`;
   }

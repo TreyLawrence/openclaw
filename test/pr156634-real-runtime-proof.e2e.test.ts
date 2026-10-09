@@ -574,6 +574,11 @@ describe("PR #156634 real runtime proof", () => {
               skipBootstrap: true,
               model: { primary: provider.primaryRef },
               thinkingDefault: "low",
+              // The safeguard keeps recent turns verbatim and skips the summary model
+              // when nothing else is left to summarize; preserve none so the warmup
+              // turn must be summarized by the held preflight compaction call, and
+              // accept the mock summary as-is (summary quality is not under test).
+              compaction: { recentTurnsPreserve: 0, qualityGuard: { enabled: false } },
             },
             entries: { main: {} },
           },

@@ -50,6 +50,8 @@ import {
 import { prepareSessionCostUsageRefreshLock } from "./session-cost-usage-cache.sqlite.js";
 import {
   createIncognitoUsageCostAdapter,
+  createUsageCostIncognitoReadObservation,
+  captureUsageCostIncognitoBinding,
   type UsageCostIncognitoBinding,
 } from "./session-cost-usage-incognito.js";
 import {
@@ -78,6 +80,7 @@ export type PreparedUsageCostWorker = {
   config?: OpenClawConfig;
   agentDir: string;
   databases: Array<OpenClawAgentDatabaseOptions & { agentId: string; path: string }>;
+  incognito?: UsageCostIncognitoBinding;
 };
 
 export function prepareUsageCostWorker(params: {
@@ -89,7 +92,9 @@ export function prepareUsageCostWorker(params: {
   sessionsDir?: string;
   sessionFiles?: readonly string[];
   env?: NodeJS.ProcessEnv;
+  incognito?: UsageCostIncognitoBinding;
 }): PreparedUsageCostWorker {
+  const incognito = captureUsageCostIncognitoBinding(params);
   const agentId = normalizeAgentId(params.agentId);
   const env = cloneEnvWithPlatformSemantics(params.env ?? process.env);
   env.OPENCLAW_STATE_DIR = resolveStateDir(env);
@@ -99,6 +104,7 @@ export function prepareUsageCostWorker(params: {
       env,
       storePath:
         params.storePath ??
+        incognito?.actor.path ??
         (params.sessionsDir ? path.join(params.sessionsDir, "sessions.json") : undefined),
     },
     params.config,
@@ -146,6 +152,7 @@ export function prepareUsageCostWorker(params: {
     config: params.config,
     agentDir: params.agentDir ?? resolveAgentDir(params.config ?? {}, agentId),
     databases: [...databases.values()],
+    incognito,
   };
 }
 
@@ -208,11 +215,13 @@ type UsageCostWorkerRequest =
 export async function runUsageCostWorker(
   prepared: PreparedUsageCostWorker,
   operation: UsageCostWorkerRequest,
-  incognito?: UsageCostIncognitoBinding,
+  suppliedIncognito?: UsageCostIncognitoBinding,
 ): Promise<UsageCostWorkerResult | { kind: "busy" }> {
+  const incognito = suppliedIncognito ?? prepared.incognito;
   if (!incognito) {
     return runPreparedUsageCostWorker(prepared, operation);
   }
+  incognito.admissionSignal?.throwIfAborted();
   const captured = {
     ...prepared,
     location: structuredClone(prepared.location),
@@ -257,22 +266,31 @@ export async function runUsageCostWorker(
   ) {
     throw new Error("Usage request contains another incognito session");
   }
-  return incognito.actor.sessions.withCompute(
+  const observation =
+    capturedOperation.kind === "refresh"
+      ? undefined
+      : createUsageCostIncognitoReadObservation(incognito);
+  const result = await incognito.actor.sessions.withCompute(
     incognito.authority,
     target,
     async (compute) => {
       const instances = target
         ? [{ ...target, updatedAtMs: 0 }]
         : await compute.execute({ type: "session.compute.store.inventory", input: {} });
-      instances.forEach(({ sessionKey }) => incognito.retainSource?.(sessionKey));
+      instances.forEach(({ sessionKey }) => {
+        incognito.retainSource?.(sessionKey);
+      });
       return runPreparedUsageCostWorker(
         captured,
         capturedOperation,
         createIncognitoUsageCostAdapter(compute, target, marker, instances),
       );
     },
-    getAsyncWorkSignal(),
+    operation.kind === "refresh" ? undefined : (incognito.admissionSignal ?? getAsyncWorkSignal()),
+    observation?.onRead,
   );
+  observation?.assertCurrent();
+  return result;
 }
 
 async function runPreparedUsageCostWorker(
@@ -469,7 +487,7 @@ async function runPreparedUsageCostWorker(
               // SAFETY: The paired worker constructs this union; host effects still check current authority.
               const request = value as UsageCostWorkerHostRequest;
               if (incognito && request.kind.startsWith("memory-")) {
-                const output = await incognito.read(request);
+                const output = await incognito.read(request, context.signal);
                 assertRequestCurrent();
                 return {
                   input: { ok: true, value: output } satisfies UsageCostWorkerHostReply,
@@ -497,6 +515,9 @@ async function runPreparedUsageCostWorker(
                   await restoreSessionColdTranscript(
                     { ...request.input, storePath: binding.options.path, env: location.env },
                     assertRequestCurrent,
+                    undefined,
+                    undefined,
+                    context.signal,
                   );
                   output = undefined;
                   break;
@@ -601,7 +622,7 @@ async function runPreparedUsageCostWorker(
                   if (!lock) {
                     throw new Error("Usage report cannot prune cache rows");
                   }
-                  await lock.pruneRows(pruneRows);
+                  await lock.pruneRows(pruneRows, context.signal);
                   pruneRows.length = 0;
                   output = undefined;
                   break;
@@ -609,17 +630,21 @@ async function runPreparedUsageCostWorker(
                   if (!lock) {
                     throw new Error("Usage report cannot write cache rows");
                   }
-                  output = await lock.writeRollup({
-                    rollupId: request.input.key,
-                    previousValueJson: request.input.previousValue,
-                    valueJson: request.input.value,
-                    blob: request.input.blob,
-                    updatedAt: request.input.updatedAt,
-                  });
+                  output = await lock.writeRollup(
+                    {
+                      rollupId: request.input.key,
+                      previousValueJson: request.input.previousValue,
+                      valueJson: request.input.value,
+                      blob: request.input.blob,
+                      updatedAt: request.input.updatedAt,
+                    },
+                    context.signal,
+                  );
                   if (output && failedKeys.has(failureKey(request.input.key))) {
                     await failures
                       .delete(failureKey(request.input.key), {
                         assertCurrent: assertRequestCurrent,
+                        signal: context.signal,
                       })
                       .catch((error: unknown) => {
                         logger.warn("Could not clear usage refresh failure fact", { error });

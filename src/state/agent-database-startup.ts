@@ -10,6 +10,7 @@ import {
 import { readSqliteIntegrityFileIdentity } from "../infra/sqlite-file-generation.js";
 import { withSqliteReadOnlyWorkerScope } from "../infra/sqlite-readonly-worker.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { normalizeAgentId } from "../routing/session-key.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { runInDetachedAsyncContext } from "../shared/detached-async-context.js";
 import { createPermitPool } from "../shared/permit-pool.js";
@@ -18,6 +19,7 @@ import {
   failPendingAgentDatabase,
   listAgentDatabaseAdmissionRefusals,
   preparePendingAgentDatabase,
+  readAgentDatabaseAdmissionRefusal,
   type AgentDatabaseAdmissionRefusal,
 } from "./agent-database-admission.js";
 import { readAgentDeletionJournalStatusInWorker } from "./agent-deletion-journal.read.js";
@@ -56,9 +58,9 @@ type Activation = {
 type PreparationPhase =
   | "inspection"
   | "activation"
+  | "readiness"
   | "open-wait"
   | "open"
-  | "readiness"
   | "migration-wait"
   | "migration"
   | "publication-wait"
@@ -67,6 +69,7 @@ type PreparationPhase =
   | "publication";
 type PendingRecovery = {
   refusal: AgentDatabaseAdmissionRefusal;
+  completion: Promise<void>;
   startedAt: number;
   phase: PreparationPhase;
   phaseStartedAt: number;
@@ -233,6 +236,25 @@ class AgentDatabaseStartupAdmission {
     return this.work.size > 0 ? Promise.allSettled(this.work) : undefined;
   }
 
+  get hasPendingAgents(): boolean {
+    return this.pending.size > 0;
+  }
+
+  /** Join only the current agent preparation, without holding channel startup or healthy agents. */
+  waitForAgentPreparation(
+    agentId: string,
+    options: { env?: NodeJS.ProcessEnv; signal?: AbortSignal } = {},
+  ): Promise<void> | undefined {
+    const pending = this.pending.get(normalizeAgentId(agentId));
+    if (!pending || readAgentDatabaseAdmissionRefusal(agentId, options) !== pending.refusal) {
+      return undefined;
+    }
+    return racePromiseWithAbortSignal(
+      pending.completion,
+      options.signal ? AbortSignal.any([this.signal, options.signal]) : this.signal,
+    );
+  }
+
   track(work: Promise<unknown>): void {
     this.work.add(work);
     void work.then(
@@ -328,8 +350,10 @@ class AgentDatabaseStartupAdmission {
         reason: `Agent ${agentId} has not completed startup inspection and preparation. ${params.reason}`,
       });
       const startedAt = performance.now();
+      const completion = createDeferredCore();
       const recovery: PendingRecovery = {
         refusal,
+        completion: completion.promise,
         startedAt,
         phase: "inspection",
         phaseStartedAt: startedAt,
@@ -344,7 +368,7 @@ class AgentDatabaseStartupAdmission {
       this.pending.set(agentId, recovery);
       this.startProgress();
       refusals.push(refusal);
-      log.warn(refusal.reason, { agentId, paths, repairHint: refusal.repairHint });
+      log.info(refusal.reason, { agentId, paths });
       const witnesses = paths.map((pathname) => {
         try {
           return { pathname, identity: readSqliteIntegrityFileIdentity(pathname) };
@@ -408,6 +432,9 @@ class AgentDatabaseStartupAdmission {
               );
             }
           }
+          phase("readiness");
+          await racePromiseWithAbortSignal(activation.preparationReady, this.signal);
+          assertCurrent();
           await withSqliteReadOnlyWorkerScope(
             async () => {
               await assertNotDeleted();
@@ -429,9 +456,6 @@ class AgentDatabaseStartupAdmission {
                 } finally {
                   release?.();
                 }
-                phase("readiness");
-                await racePromiseWithAbortSignal(activation.preparationReady, this.signal);
-                assertCurrent();
                 phase("migration-wait");
                 const releaseMigration = await this.migrating.acquire({ signal: this.signal });
                 try {
@@ -468,6 +492,7 @@ class AgentDatabaseStartupAdmission {
               agentId,
               paths,
               reason,
+              repairHint: readAgentDatabaseAdmissionRefusal(agentId, { env })?.repairHint,
               ...recoveryTiming(recovery),
             });
           }
@@ -482,6 +507,7 @@ class AgentDatabaseStartupAdmission {
             this.publishingAgentId = undefined;
           }
           publicationComplete.resolve();
+          completion.resolve();
         }
       });
       this.track(work);

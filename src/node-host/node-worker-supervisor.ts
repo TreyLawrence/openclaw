@@ -23,6 +23,7 @@ import type {
 } from "../worker/node-workspace-retain-protocol.js";
 import type { WorkerConnectionEndpoint } from "../worker/worker-connection-endpoint.js";
 import type { NodeWorkerProcessInput } from "../worker/worker-process-observation.js";
+import { throwNodeHostCleanupErrors } from "./cleanup-errors.js";
 import { NodeWorkerCapacity } from "./node-worker-capacity.js";
 import { NodeWorkerChildLifecycle } from "./node-worker-child-lifecycle.js";
 import { NodeWorkerContainerLifecycle } from "./node-worker-container-lifecycle.js";
@@ -75,14 +76,18 @@ class NodeWorkerSupervisor {
 
   constructor(options: NodeWorkerSupervisorOptions = {}) {
     const env = options.env ?? process.env;
+    const startup = {
+      nativeInferenceSnapshot: options.nativeInferenceSnapshot,
+      workerEnv: snapshotNodeWorkerEnv(env),
+      engineEnv: { ...process.env, ...env },
+    };
     const bundleRoot = path.resolve(
       options.bundleRoot ?? path.join(resolveStateDir(env), "node-host"),
     );
     this.journal = new NodeWorkerJournalWorker({ env });
     this.store = new NodeWorkerLaunchStore(this.journal);
     this.turns = new NodeWorkerTurnStore(this.journal);
-    this.workerEnv = snapshotNodeWorkerEnv(env);
-    const engineEnv = { ...process.env, ...env };
+    this.workerEnv = startup.workerEnv;
     const containerEngine = options.containerEngine;
     this.containerLifecycle = options.containerEngine
       ? new NodeWorkerContainerLifecycle(options.containerEngine, bundleRoot, this.store)
@@ -101,7 +106,7 @@ class NodeWorkerSupervisor {
     });
     this.children = new NodeWorkerChildLifecycle({
       bundleRoot,
-      engineEnv,
+      ...startup,
       store: this.store,
       turns: this.turns,
       capacity: this.capacity,
@@ -352,7 +357,6 @@ class NodeWorkerSupervisor {
       workerEnv: homeDir ? snapshotNodeWorkerEnv(this.workerEnv, homeDir) : this.workerEnv,
       input,
       descriptor,
-      planHash: claimInput.planHash,
       supervisor,
       signal,
       claim: claimInput,
@@ -557,11 +561,7 @@ class NodeWorkerSupervisor {
           result.status === "rejected" ? [result.reason] : [],
         ),
       );
-      if (errors.length > 0) {
-        throw errors.length === 1
-          ? errors[0]
-          : new AggregateError(errors, "node worker environment cleanup failed");
-      }
+      throwNodeHostCleanupErrors(errors, "node worker environment cleanup failed");
     });
   }
 
@@ -709,11 +709,7 @@ class NodeWorkerSupervisor {
     await this.journal
       .drain({ close: errors.length === 0 })
       .catch((error: unknown) => errors.push(error));
-    if (errors.length > 0) {
-      throw errors.length === 1
-        ? errors[0]
-        : new AggregateError(errors, "node worker terminal reconciliation failed");
-    }
+    throwNodeHostCleanupErrors(errors, "node worker terminal reconciliation failed");
   }
 }
 

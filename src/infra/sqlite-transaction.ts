@@ -167,6 +167,8 @@ function beginImmediateTransaction(
 export type SqliteTransactionOptions = {
   /** Already-started BEGIN budget, carried between workers in the same process. */
   beginDeadlineNs?: bigint;
+  /** An outer owner handles nonblocking admission failures. */
+  beginLockFailureReporting?: "suppress";
   busyTimeoutMs?: number;
   databaseLabel?: string;
   /** Prepared identifiers and counts only; never transcript or session payloads. */
@@ -305,7 +307,11 @@ function execTimedTransactionStep(params: {
     return elapsedMs;
   } catch (error) {
     const elapsedMs = Date.now() - startedAt;
-    if (isSqliteLockError(error) && shouldReportSqliteLockFailure(params.db)) {
+    if (
+      isSqliteLockError(error) &&
+      shouldReportSqliteLockFailure(params.db) &&
+      !(params.step === "begin" && params.options?.beginLockFailureReporting === "suppress")
+    ) {
       const sqliteErrcode = sqliteExtendedResultCode(error);
       const sqlitePrimaryCode = sqlitePrimaryResultCode(error);
       (params.options?.logger ?? transactionLog).warn("SQLite transaction lock wait failed", {
@@ -521,12 +527,14 @@ export async function runSqliteImmediateTransaction<T>(
   if (db.isTransaction) {
     throw new Error("Asynchronous SQLite preparation cannot join an existing transaction");
   }
-  const deadline = performance.now() + readSqliteBusyTimeout(db);
   const inheritedDeadlineNs = options?.beginDeadlineNs;
-  const remainingMs =
-    inheritedDeadlineNs === undefined
-      ? () => deadline - performance.now()
-      : () => Number(inheritedDeadlineNs - process.hrtime.bigint()) / 1_000_000;
+  const remainingMs = (() => {
+    if (inheritedDeadlineNs !== undefined) {
+      return () => Number(inheritedDeadlineNs - process.hrtime.bigint()) / 1_000_000;
+    }
+    const deadline = performance.now() + readSqliteBusyTimeout(db);
+    return () => deadline - performance.now();
+  })();
   let entered = false;
   while (true) {
     const operation = await prepare();

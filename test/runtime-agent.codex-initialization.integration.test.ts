@@ -27,16 +27,18 @@ import {
 import { withPluginRuntimeRegistryScope } from "../src/plugins/runtime/gateway-request-scope.js";
 import { createRuntimeAgent } from "../src/plugins/runtime/runtime-agent.js";
 import { createPluginRecord } from "../src/plugins/status.test-helpers.js";
+import { sessionChanges } from "../src/sessions/session-row-changes.js";
 import * as upstreamLinks from "../src/sessions/session-upstream-links.js";
+import { readSessionUpstreamLinkInDatabase } from "../src/sessions/session-upstream-links.kernel.js";
 import {
   openOpenClawAgentDatabase,
   runOpenClawAgentWriteTransaction,
-  deferOpenClawAgentPostCommitPublication,
 } from "../src/state/openclaw-agent-db.js";
+import { openOpenClawStateDatabase } from "../src/state/openclaw-state-db.js";
 import { observeMainThreadReads } from "../src/test-utils/main-thread-sql-spies.test-support.js";
 import { withOpenClawTestState } from "../src/test-utils/openclaw-test-state.js";
 
-const { readSessionUpstreamLink, upsertSessionUpstreamLink } = upstreamLinks;
+const { upsertSessionUpstreamLink } = upstreamLinks;
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -103,8 +105,12 @@ describe("Codex initialization through the registered session deletion owner", (
         let linkFailureInjected = false;
         let linkGrantCount = 0;
         let linkGrantReads = 0;
-        let rollbackCommitArmed = false;
         let rollbackCommitRefused = false;
+        let rejectReadinessCommit = false;
+        let readinessCommitRefused = false;
+        let readinessPublicationRefused = false;
+        let readyAtPublication: ReturnType<typeof loadSessionEntry>;
+        let stopReadinessPublication: (() => void) | undefined;
         const reads = observeMainThreadReads();
         const upsertAsync = upstreamLinks.upsertSessionUpstreamLinkWithCurrentSource;
         const deleteAsync = upstreamLinks.deleteSessionUpstreamLinkAsync;
@@ -141,7 +147,11 @@ describe("Codex initialization through the registered session deletion owner", (
               expect(
                 upsertSessionUpstreamLink({
                   ...expectDefined(
-                    readSessionUpstreamLink(params.source.sessionKey, "main"),
+                    readSessionUpstreamLinkInDatabase(
+                      openOpenClawStateDatabase().db,
+                      params.source.sessionKey,
+                      "main",
+                    ),
                     "source link",
                   ),
                   threadId: "source-link-successor",
@@ -151,6 +161,17 @@ describe("Codex initialization through the registered session deletion owner", (
             }
             return createAdmission((request, grant) => {
               if (
+                rejectReadinessCommit &&
+                request.stage === "commit" &&
+                isRecord(request.facts) &&
+                isRecord(request.facts.publication) &&
+                request.facts.publication.kind === "session-entry-patch-committed"
+              ) {
+                rejectReadinessCommit = false;
+                readinessCommitRefused = true;
+                throw new Error("injected readiness failure");
+              }
+              if (
                 operation &&
                 request.stage === "commit" &&
                 failure === `source successor during link ${operation}` &&
@@ -158,16 +179,6 @@ describe("Codex initialization through the registered session deletion owner", (
               ) {
                 replaceSource();
                 linkFailureInjected = true;
-              }
-              const publication = isRecord(request.facts) ? request.facts.publication : undefined;
-              if (
-                rollbackCommitArmed &&
-                request.stage === "commit" &&
-                isRecord(publication) &&
-                publication.kind === "session-native-binding"
-              ) {
-                rollbackCommitRefused = true;
-                throw new Error("injected rollback failure");
               }
               const offsets = reads.calls.map((call) => call.mock.contexts.length);
               try {
@@ -268,7 +279,11 @@ describe("Codex initialization through the registered session deletion owner", (
                     marker: null,
                   }),
                 ).toBe(true);
-                successorLink = readSessionUpstreamLink(context.key, context.agentId);
+                successorLink = readSessionUpstreamLinkInDatabase(
+                  openOpenClawStateDatabase().db,
+                  context.key,
+                  context.agentId,
+                );
               }
               if (failure === "import") {
                 openOpenClawAgentDatabase({ agentId: "main" }).db.exec(
@@ -279,6 +294,7 @@ describe("Codex initialization through the registered session deletion owner", (
               if (!patch) {
                 throw new Error("Codex initializer did not return its final patch");
               }
+              rejectReadinessCommit = failure === "final readiness";
               return patch;
             },
           });
@@ -289,7 +305,7 @@ describe("Codex initialization through the registered session deletion owner", (
           return created;
         });
         let successorBinding: Awaited<ReturnType<typeof bindingStore.read>>;
-        let successorLink: ReturnType<typeof readSessionUpstreamLink>;
+        let successorLink: ReturnType<typeof readSessionUpstreamLinkInDatabase>;
         if (failure === "native cleanup") {
           native.archiveThread.mockRejectedValue(new Error("injected archive failure"));
           native.control.retireConnection = vi.fn();
@@ -324,15 +340,33 @@ describe("Codex initialization through the registered session deletion owner", (
           if (failure === "successor link") {
             expect(
               upsertSessionUpstreamLink({
-                ...expectDefined(readSessionUpstreamLink(params.targetKey, "main"), "created link"),
+                ...expectDefined(
+                  readSessionUpstreamLinkInDatabase(
+                    openOpenClawStateDatabase().db,
+                    params.targetKey,
+                    "main",
+                  ),
+                  "created link",
+                ),
                 marker: { turnId: "successor-turn", userMessageCount: 2 },
                 threadId: "successor-thread",
               }),
             ).toBe(true);
-            successorLink = readSessionUpstreamLink(params.targetKey, "main");
+            successorLink = readSessionUpstreamLinkInDatabase(
+              openOpenClawStateDatabase().db,
+              params.targetKey,
+              "main",
+            );
           }
           if (failure === "rollback commit") {
-            rollbackCommitArmed = true;
+            const database = openOpenClawAgentDatabase({ agentId: "main" });
+            database.db.function("observe_rollback_refusal", () => {
+              rollbackCommitRefused = true;
+              return 0;
+            });
+            database.db.exec(
+              "CREATE TEMP TRIGGER reject_rollback BEFORE DELETE ON session_nodes WHEN json_extract(OLD.entry_json, '$.initializationPending') = 1 BEGIN SELECT observe_rollback_refusal(); SELECT RAISE(ABORT, 'injected rollback failure'); END",
+            );
           }
           if (
             [
@@ -346,22 +380,31 @@ describe("Codex initialization through the registered session deletion owner", (
           ) {
             throw new Error("injected post-write failure");
           }
-          if (failure === "final readiness") {
-            openOpenClawAgentDatabase({ agentId: "main" }).db.exec(
-              "CREATE TEMP TRIGGER reject_readiness BEFORE UPDATE OF entry_json ON session_nodes WHEN json_extract(OLD.entry_json, '$.initializationPending') = 1 AND json_extract(NEW.entry_json, '$.initializationPending') IS NULL BEGIN SELECT RAISE(ABORT, 'injected readiness failure'); END",
-            );
-          }
           if (failure === "readiness publication") {
-            const database = openOpenClawAgentDatabase({ agentId: "main" });
-            database.db.function("inject_publication_failure", () => {
-              deferOpenClawAgentPostCommitPublication(database, () => {
-                throw new Error("injected readiness publication failure");
+            stopReadinessPublication = sessionChanges.subscribe((change) => {
+              if (
+                readinessPublicationRefused ||
+                !("sessionKey" in change) ||
+                change.sessionKey !== params.targetKey
+              ) {
+                return;
+              }
+              const ready = loadSessionEntry({
+                agentId: "main",
+                sessionKey: params.targetKey,
+                readConsistency: "latest",
               });
-              return 0;
+              if (
+                !ready ||
+                ready.sessionId !== childSessionId ||
+                ready.initializationPending === true
+              ) {
+                return;
+              }
+              readyAtPublication = ready;
+              readinessPublicationRefused = true;
+              throw new Error("injected readiness publication failure");
             });
-            database.db.exec(
-              "CREATE TEMP TRIGGER reject_publication AFTER UPDATE OF entry_json ON session_nodes WHEN json_extract(OLD.entry_json, '$.initializationPending') = 1 AND json_extract(NEW.entry_json, '$.initializationPending') IS NULL BEGIN SELECT inject_publication_failure(); END",
-            );
           }
           return attached;
         });
@@ -369,10 +412,19 @@ describe("Codex initialization through the registered session deletion owner", (
         const result = await withPluginRuntimeRegistryScope(
           registry,
           flow === "fork" ? invokeFork : fixture.adopt,
-        );
+        ).finally(() => stopReadinessPublication?.());
 
         if (failure === "rollback commit") {
           expect(rollbackCommitRefused).toBe(true);
+        }
+        if (failure === "final readiness") {
+          expect(readinessCommitRefused).toBe(true);
+          expect(result.message).toContain("injected readiness failure");
+        }
+        if (failure === "readiness publication") {
+          expect(readinessPublicationRefused).toBe(true);
+          expect(readyAtPublication?.sessionId).toBe(childSessionId);
+          expect(readyAtPublication?.initializationPending).toBeUndefined();
         }
         if (failure.startsWith("source successor during link")) {
           expect(linkFailureInjected).toBe(true);
@@ -381,12 +433,18 @@ describe("Codex initialization through the registered session deletion owner", (
         if (failure === "source link successor") {
           expect(linkFailureInjected).toBe(true);
           expect(result.message).toContain("Session upstream source changed during initialization");
-          expect(readSessionUpstreamLink(params.source.sessionKey, "main")?.threadId).toBe(
-            "source-link-successor",
-          );
+          expect(
+            readSessionUpstreamLinkInDatabase(
+              openOpenClawStateDatabase().db,
+              params.source.sessionKey,
+              "main",
+            )?.threadId,
+          ).toBe("source-link-successor");
         }
         expect(linkGrantReads).toBe(0);
-        expect(result).toMatchObject({ status: "failed" });
+        expect(result).toMatchObject({
+          status: failure === "readiness publication" ? "created" : "failed",
+        });
         const identity = {
           kind: "session" as const,
           agentId: "main",
@@ -395,7 +453,11 @@ describe("Codex initialization through the registered session deletion owner", (
         };
         const child = loadSessionEntry(identity);
         const binding = bindingStore.read(identity);
-        const link = readSessionUpstreamLink(params.targetKey, "main");
+        const link = readSessionUpstreamLinkInDatabase(
+          openOpenClawStateDatabase().db,
+          params.targetKey,
+          "main",
+        );
         if (failure === "lost response" || failure === "readiness publication") {
           expect(child?.initializationPending).toBeUndefined();
           expect(child?.sessionId).toBe(childSessionId);

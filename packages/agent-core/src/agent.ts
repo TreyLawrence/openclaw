@@ -34,6 +34,7 @@ import type {
   QueueMode,
   StreamFn,
   ToolExecutionMode,
+  ToolLoopRecoveryState,
 } from "./types.js";
 
 export type { QueueMode } from "./types.js";
@@ -163,10 +164,16 @@ class PendingMessageQueue {
   }
 
   enqueue(message: AgentMessage): void {
+    this.admit(message)();
+  }
+
+  admit(message: AgentMessage): () => void {
     this.messages.push(message);
-    for (const listener of this.listeners) {
-      listener();
-    }
+    return () => {
+      for (const listener of this.listeners) {
+        listener();
+      }
+    };
   }
 
   peek(): readonly AgentMessage[] {
@@ -301,7 +308,7 @@ export class Agent {
   >();
   private readonly steeringQueue: PendingMessageQueue;
   private readonly followUpQueue: PendingMessageQueue;
-  private readonly toolLoopRecoveryState = { criticalToolLoopSeen: false };
+  private toolLoopRecoveryState: ToolLoopRecoveryState = { criticalToolLoopSeen: false };
 
   public convertToLlm: NonNullable<AgentOptions["convertToLlm"]>;
   public transformContext?: NonNullable<AgentOptions["transformContext"]>;
@@ -401,7 +408,12 @@ export class Agent {
    * message's unstarted sequential tail can be skipped. Parallel batches always run.
    */
   steer(message: AgentMessage): void {
-    this.steeringQueue.enqueue(message);
+    this.admitSteeringMessage(message)();
+  }
+
+  /** Install admitted input synchronously; notify listeners after admission custody ends. */
+  admitSteeringMessage(message: AgentMessage): () => void {
+    return this.steeringQueue.admit(message);
   }
 
   /** Cancel queued input unless a live provider response may already have admitted it. */
@@ -461,7 +473,7 @@ export class Agent {
     this.mutableState.streamingMessage = undefined;
     this.mutableState.pendingToolCalls = new Set<string>();
     this.mutableState.errorMessage = undefined;
-    this.toolLoopRecoveryState.criticalToolLoopSeen = false;
+    this.toolLoopRecoveryState = { criticalToolLoopSeen: false };
     this.clearAllQueues();
   }
 
@@ -712,6 +724,9 @@ export class Agent {
           this.mutableState.streamingMessage = undefined;
         }
         this.mutableState.messages.push(event.message);
+        if (event.message.role === "user") {
+          delete this.toolLoopRecoveryState.repeatedToolError;
+        }
         this.steeringQueue.commit(event.message);
         this.followUpQueue.commit(event.message);
         break;
