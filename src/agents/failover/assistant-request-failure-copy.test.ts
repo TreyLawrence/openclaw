@@ -35,7 +35,7 @@ describe("renderAssistantRequestFailureCopy", () => {
   it.each([
     [
       "Invalid session transcript entry: model_change PRIVATE_CANARY",
-      "OpenClaw couldn't read this conversation's history. Try /compact, or start a new conversation with /new.",
+      "OpenClaw couldn't read this conversation's history. Ask the Gateway operator to try `openclaw doctor --fix`. If it still fails, preserve the history and contact support with the Gateway logs.",
     ],
     [
       "invalid session",
@@ -137,6 +137,23 @@ describe("renderAssistantRequestFailureCopy", () => {
     ).toBe(
       "The AI service couldn't accept this conversation. Start a new conversation with /new, or choose another model in the Control UI.",
     );
+  });
+
+  it.each([
+    "Unknown parameter: 'reasoning_effort'",
+    'Unsupported field: "reasoning_effort"',
+    "got an unexpected keyword argument 'reasoning_effort'",
+    "'reasoning_effort' is not supported for this model",
+  ])("gives the custom-model opt-out for rejected reasoning controls: %s", (detail) => {
+    const assistant = makeAssistantMessageFixture({
+      provider: "custom-local",
+      model: "reasoning-model",
+      errorMessage: `400 ${JSON.stringify({ error: { type: "invalid_request_error", message: detail } })}`,
+    });
+    const expected =
+      "This model endpoint does not support reasoning_effort. Set compat.supportsReasoningEffort: false on this model in your custom provider configuration and try again.";
+    expect(formatUserFacingAssistantErrorText(assistant)).toBe(expected);
+    expect(renderRecordedAssistantFailureCopy(assistant)).toBe(expected);
   });
 
   it.each([

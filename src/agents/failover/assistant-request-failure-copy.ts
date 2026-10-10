@@ -13,6 +13,7 @@ import { isContextOverflowErrorFromTables } from "./context-overflow-tables.js";
 import {
   isServerErrorMessage,
   isSessionTranscriptValidationErrorMessage,
+  isUnsupportedReasoningEffortParameterError,
   resolveExecutionApprovalFailureMessage,
 } from "./message-patterns.js";
 import { extractFailoverSignalDetails } from "./signal-details.js";
@@ -22,8 +23,6 @@ export const ERROR_PREFIX_RE =
   /^(?:error|(?:[a-z][\w-]*\s+)?api\s*error|openai\s*error|anthropic\s*error|gateway\s*error|codex\s*error|request failed|failed|exception)(?:\s+\d{3})?[:\s-]+/i;
 export const PROVIDER_SCHEMA_REJECTION_USER_TEXT =
   "The AI service couldn't accept this request. Try a new conversation with /new, or choose another model in the Control UI.";
-const GATEWAY_SESSION_TRANSCRIPT_VALIDATION_USER_TEXT =
-  "OpenClaw couldn't read this conversation's history. Try /compact, or start a new conversation with /new.";
 const PROVIDER_OUTPUT_TOKEN_LIMIT_RE =
   /^['"]?max_(?:tokens|output_tokens|completion_tokens|new_tokens)['"]?\s*(?:[:=]\s*)?\(?(\d[\d,]*)\)?\s+exceeds?\b.{0,120}?\b(?:maximum|max|limit)\b(?:\s+(?:output\s+)?tokens?)?(?:\s+(?:is|of)|\s*[:=])?\s*\(?(\d[\d,]*)\)?(?:\D|$)/i;
 const PROVIDER_CACHE_CONTROL_LIMIT_RE =
@@ -144,10 +143,13 @@ export function renderFormatErrorCopy(raw: string): string {
     candidate = parsedMessage;
   }
   if (isSessionTranscriptValidationErrorMessage(candidate)) {
-    return GATEWAY_SESSION_TRANSCRIPT_VALIDATION_USER_TEXT;
+    return "OpenClaw couldn't read this conversation's history. Ask the Gateway operator to try `openclaw doctor --fix`. If it still fails, preserve the history and contact support with the Gateway logs.";
   }
   if (PROVIDER_CACHE_CONTROL_LIMIT_RE.test(candidate)) {
     return "The AI service couldn't accept this conversation. Start a new conversation with /new, or choose another model in the Control UI.";
+  }
+  if (isUnsupportedReasoningEffortParameterError(candidate)) {
+    return "This model endpoint does not support reasoning_effort. Set compat.supportsReasoningEffort: false on this model in your custom provider configuration and try again.";
   }
   if (candidate.length > 300 || !PROVIDER_OUTPUT_TOKEN_LIMIT_RE.test(candidate)) {
     if (!candidate || /^[{<]/u.test(candidate)) {
