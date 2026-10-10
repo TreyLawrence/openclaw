@@ -1,5 +1,5 @@
 /**
- * Real runtime proof: a loopback Anthropic-format provider streams a large argument
+ * Real runtime proof for PR #168270: a loopback Anthropic-format provider streams a large argument
  * for a non-edit tool over several seconds. The embedded runner must emit counts-only
  * `tool` / `input_delta` progress for that call while its input streams, before the
  * tool starts, and must never put argument content in those events.
