@@ -7,7 +7,7 @@ import { readDatabasePathIdentitySync } from "../../infra/sqlite-worker-identity
 import { sessionChanges } from "../../sessions/session-row-changes.js";
 import { sessionChangeAffectsStoredRow } from "../../sessions/session-row-facts.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
-import { freezeJsonSnapshot } from "../../shared/immutable-data.js";
+import { freezeJsonSnapshot, isDeeplyFrozenPlainData } from "../../shared/immutable-data.js";
 import type {
   AgentDatabaseExecutionFileIdentity,
   AgentDatabaseIncognitoIdentity,
@@ -86,6 +86,32 @@ function ensureReplicaSubscription(): void {
   pool.unsubscribe = sessionChanges.subscribeFacts((change) => {
     // Receipt installation reorders the LRU map, so visit the original cells once.
     const cellsBeforePublication = [...pool.cells.values()];
+    const publishedKey =
+      !("all" in change) && !change.factsInvalidated ? change.sessionKey : undefined;
+    const created = publishedKey ? readPreparedSessionEntryChange(change, publishedKey) : undefined;
+    if (publishedKey && created?.fullEntry && typeof created.source.identity === "string") {
+      const target: FileTarget = {
+        sessionKey: publishedKey,
+        database: {
+          kind: "file",
+          physicalIdentity: created.source.identity,
+          birthtime: created.source.birthtime,
+          nativeLocation: created.source.canonicalPath ?? created.source.filename,
+        },
+      };
+      if (
+        !pool.cells.has(targetKey(target)) &&
+        created.source.writeToken ===
+          readSqliteDatabaseWriteTokenForPath(target.database.nativeLocation)
+      ) {
+        // Creation already owns the complete entry; its first reader need not fetch it again.
+        retainSessionActorEntryFacts(
+          target,
+          { entry: created.fullEntry, snapshots: "full", projection: created.projection },
+          created.source.incarnation,
+        );
+      }
+    }
     for (const cell of cellsBeforePublication) {
       const { database, sessionKey } = cell.target;
       if (
@@ -136,6 +162,10 @@ function ensureReplicaSubscription(): void {
         source.identity === database.physicalIdentity &&
         prepared.source.writeToken === readSqliteDatabaseWriteTokenForPath(database.nativeLocation)
       ) {
+        if (prepared.actorPostimage) {
+          retainSnapshot(cell, prepared.actorPostimage, prepared.source.incarnation);
+          continue;
+        }
         const dependencySessionIds = [prepared.fullEntry.sessionId];
         const writeToken = readSqliteDatabaseScopedWriteTokenForPath(database.nativeLocation, [
           ...collectSessionEntryLookupKeys(sessionKey),
@@ -191,6 +221,26 @@ function discard(cell: ReplicaCell): void {
   cell.entry = undefined;
   cell.predicateColumns = undefined;
   cell.bytes = 0;
+}
+
+function retainSnapshot(
+  cell: ReplicaCell,
+  state: SessionActorHotState,
+  generation: string | undefined,
+): void {
+  const detached = isDeeplyFrozenPlainData(state)
+    ? state
+    : freezeJsonSnapshot(structuredClone(state));
+  discard(cell);
+  cell.snapshot = detached;
+  cell.predicateColumns = detached.entry
+    ? deriveSessionPredicateColumns(JSON.stringify(detached.entry))
+    : undefined;
+  cell.generation = generation;
+  cell.bytes = JSON.stringify(detached).length * 2;
+  pool.snapshots += 1;
+  pool.bytes += cell.bytes;
+  touch(cell);
 }
 
 function forgetUnused(cell: ReplicaCell): void {
@@ -454,21 +504,11 @@ export function createSessionActorReplica(
     state: SessionActorHotState,
     expectedGeneration: string | undefined,
   ): boolean => {
-    const detached = freezeJsonSnapshot(structuredClone(state));
-    if (!accepts(detached, expectedGeneration)) {
+    if (!accepts(state, expectedGeneration)) {
       discard(owned);
       return false;
     }
-    discard(owned);
-    owned.snapshot = detached;
-    owned.predicateColumns = detached.entry
-      ? deriveSessionPredicateColumns(JSON.stringify(detached.entry))
-      : undefined;
-    owned.generation = expectedGeneration;
-    owned.bytes = JSON.stringify(detached).length * 2;
-    pool.snapshots += 1;
-    pool.bytes += owned.bytes;
-    touch(owned);
+    retainSnapshot(owned, state, expectedGeneration);
     return owned.snapshot !== undefined;
   };
   const begin = () => {
@@ -496,7 +536,7 @@ export function createSessionActorReplica(
   };
 
   return {
-    /** Each borrower validates its current physical generation before disclosure. */
+    /** Borrow the immutable revision only after validating its current physical generation. */
     read(): SessionActorHotState | undefined {
       params.lifetime.assertReadable();
       if (closed || !owned.snapshot) {
@@ -513,7 +553,7 @@ export function createSessionActorReplica(
         return undefined;
       }
       touch(owned);
-      return structuredClone(owned.snapshot);
+      return owned.snapshot;
     },
     beginRead() {
       const settle = begin();
@@ -528,12 +568,13 @@ export function createSessionActorReplica(
     },
     beginCommand() {
       const previous = owned.snapshot;
+      const previousGeneration = owned.generation;
       const settle = begin();
       return {
         settle<Value>(outcome: SessionActorOutcome<Value>): boolean {
           return settle((expectedGeneration) => {
             if (outcome.kind === "rolled-back") {
-              return previous !== undefined && install(previous, expectedGeneration);
+              return previous !== undefined && install(previous, previousGeneration);
             }
             if (outcome.kind === "unknown") {
               discard(owned);

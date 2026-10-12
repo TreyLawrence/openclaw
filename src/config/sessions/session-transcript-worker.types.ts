@@ -52,6 +52,7 @@ import type {
 import type {
   LatestTranscriptAssistantText,
   TranscriptEvent,
+  SessionTranscriptStats,
   SessionTranscriptRawDeltaResult,
   SessionTranscriptVisibleMessageDeltaResult,
 } from "./session-accessor.sqlite-contract.js";
@@ -118,6 +119,8 @@ import type {
   SessionMembersWorkerInput,
   SessionMembershipFactsWorkerInput,
   SessionSuggestionsWorkerInput,
+  SessionReactionsWorkerInput,
+  SessionReactionsWorkerResult,
 } from "./session-sharing-read.types.js";
 import type { SessionMembersSnapshot } from "./session-sharing-store.kernel.js";
 import type { StoredSessionSuggestion } from "./session-sharing-store.types.js";
@@ -166,6 +169,7 @@ import type {
   SessionTranscriptAnchorsWorkerInput,
   SessionModelContextWorkerInput,
   SessionTranscriptWatermarkWorkerInput,
+  SessionTranscriptStatsWorkerInput,
   SessionTranscriptMessagePresenceWorkerInput,
   SessionTranscriptDeltaWorkerInput,
   SessionTranscriptLatestAssistantWorkerInput,
@@ -337,6 +341,7 @@ export type SessionHistoryWorkerInput =
   | SessionPreviewWorkerInput
   | SessionTitleFieldsWorkerInput
   | SessionTranscriptWatermarkWorkerInput
+  | SessionTranscriptStatsWorkerInput
   | SessionTranscriptMessagePresenceWorkerInput
   | SessionTranscriptDeltaWorkerInput
   | SessionTranscriptLatestAssistantWorkerInput
@@ -348,6 +353,7 @@ export type SessionHistoryWorkerInput =
   | SessionProjectionStatusWorkerInput
   | SessionMembersWorkerInput
   | SessionSuggestionsWorkerInput
+  | SessionReactionsWorkerInput
   | SessionMembershipFactsWorkerInput
   | SessionProgressCardWorkerInput
   | PendingInputHistoryWorkerInput
@@ -464,6 +470,7 @@ export type SessionTranscriptWorkerValues = SessionTranscriptInventoryWorkerValu
     "session-preview": { kind: "session-preview"; items: SessionPreviewItem[] };
     "session-title-fields": { kind: "session-title-fields"; fields: SessionTitleFields };
     "transcript-watermark": { kind: "transcript-watermark"; watermark: SessionTranscriptWatermark };
+    "transcript-stats": { kind: "transcript-stats"; stats: SessionTranscriptStats };
     "transcript-message-presence": { kind: "transcript-message-presence"; present: boolean };
     "transcript-anchors": { kind: "transcript-anchors"; facts: SessionTranscriptAnchorFacts };
     "session-activity-summary-source": {
@@ -475,6 +482,7 @@ export type SessionTranscriptWorkerValues = SessionTranscriptInventoryWorkerValu
     "projection-status": boolean;
     "session-members": { kind: "session-members" } & SessionMembersSnapshot;
     "session-suggestions": { kind: "session-suggestions"; suggestions: StoredSessionSuggestion[] };
+    "session-reactions": SessionReactionsWorkerResult;
     "session-membership-facts": SessionMembershipFacts;
     "session-progress-card": { kind: "session-progress-card"; card: ProgressCard | null };
     "goal-operation-receipt": {
@@ -528,10 +536,16 @@ export type SessionTranscriptWorkerValues = SessionTranscriptInventoryWorkerValu
     "session-reset-recall": {
       cutoff: import("../../../packages/memory-host-sdk/src/host/session-reset-recall.js").SessionResetRecallCutoff;
     };
-    "session-entry": {
-      entry: SessionFileEntry | null;
-      resetRecallCutoff: ReturnType<typeof readSessionEntryResetRecallCutoff>;
-    };
+    "session-entry":
+      | {
+          entry: SessionFileEntry | null;
+          resetRecallCutoff: ReturnType<typeof readSessionEntryResetRecallCutoff>;
+        }
+      | {
+          snapshot: ReturnType<
+            typeof import("./session-accessor.sqlite-read.js").readTranscriptExportSnapshotReadOnlySync
+          >;
+        };
   };
 
 export type SessionTranscriptWorkerError =
@@ -655,6 +669,7 @@ export type SessionHistoryWorkerDatabase = SessionTranscriptInventoryReaders &
       SessionTranscriptWatermarkWorkerInput,
       SessionTranscriptWatermark
     >;
+    readStats: SessionHistoryReader<SessionTranscriptStatsWorkerInput, SessionTranscriptStats>;
     readActivitySummarySource: SessionHistoryReader<
       SessionActivitySummarySourceWorkerInput,
       SessionActivitySummaryBatchResult
@@ -697,6 +712,10 @@ export type SessionHistoryWorkerDatabase = SessionTranscriptInventoryReaders &
     readDiagnosticText: SessionHistoryReader<SessionDiagnosticTextWorkerInput, string | undefined>;
     readMembers: SessionHistoryReader<SessionMembersWorkerInput>;
     readSuggestions: SessionHistoryReader<SessionSuggestionsWorkerInput, StoredSessionSuggestion[]>;
+    readReactions: SessionHistoryReader<
+      SessionReactionsWorkerInput,
+      SessionReactionsWorkerResult["reactions"]
+    >;
     readMembershipFacts: SessionHistoryReader<SessionMembershipFactsWorkerInput>;
     readProgressCard: SessionHistoryReader<SessionProgressCardWorkerInput, ProgressCard | null>;
     readConversationDelivery: SessionHistoryReader<

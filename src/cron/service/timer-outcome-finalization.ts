@@ -1,14 +1,14 @@
-/** Finalizes receipts, runtime rows, and active markers for every cron execution. */
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
+/** Finalizes receipts, runtime rows, and active markers for every cron execution. */
+import { runOpenClawStateWorkerOperation } from "../../state/openclaw-state-worker-store.js";
 import { clearCronJobActive, isCronActiveJobMarkerCurrent } from "../active-jobs.js";
 import {
   CronRunReceiptRevisionError,
-  finishCronRunReceiptAsync,
   releaseLocalCronRunReceiptOwnership,
 } from "../store/run-receipt-store.js";
+import { needsCronTimerMaintenance } from "./jobs-scheduling.js";
 import { locked } from "./locked.js";
 import { clearManualCronJobActive, maybeNotifyManualIsolatedSetupTimeout } from "./ops-shared.js";
-import { releaseQueuedCronRun, supersedeActivatedCronRun } from "./run-admission.js";
 import { finalizeCronRuntimeRows, type CronFinalizationReceipt } from "./run-finalization.js";
 import { recordQuietCronEvaluation } from "./run-history.js";
 import { resolveCronRunReceiptTerminalStatus } from "./run-receipts.js";
@@ -31,71 +31,6 @@ type CompletedCronRunOutcomeFinalizationOptions = {
   repairFutureCronNextRunAtMs?: boolean;
   onRequestedRunFinalized?: () => void;
 };
-
-/** Coalesces terminal cron writes without holding an execution admission slot. */
-export function createCompletedCronRunOutcomeDrain(
-  state: CronServiceState,
-  opts?: CompletedCronRunOutcomeFinalizationOptions,
-) {
-  const pendingOutcomes: TimedCronRunOutcome[] = [];
-  const finalizedOutcomes: TimedCronRunOutcome[] = [];
-  let drainPromise: Promise<void> | undefined;
-  let drainFailure: { error: unknown } | undefined;
-
-  const startDrain = () => {
-    if (drainPromise || pendingOutcomes.length === 0) {
-      return;
-    }
-    // Sibling workers can finish together; yield before snapshotting so one
-    // locked reload and write settles every outcome already in the queue.
-    drainPromise = Promise.resolve()
-      .then(async () => {
-        while (pendingOutcomes.length > 0) {
-          const completed = pendingOutcomes.splice(0);
-          try {
-            finalizedOutcomes.push(
-              ...(await finalizeCompletedCronRunOutcomes(state, completed, opts)),
-            );
-          } catch (error) {
-            // One failed store write cannot abandon sibling outcomes: their
-            // marker and reservation cleanup still belongs to this drain.
-            drainFailure ??= { error };
-          }
-        }
-      })
-      .catch((error: unknown) => {
-        // Keep background failures observed; the owning scheduler propagates
-        // them when it joins the drain before completing its batch.
-        drainFailure ??= { error };
-      })
-      .finally(() => {
-        drainPromise = undefined;
-        if (pendingOutcomes.length > 0) {
-          startDrain();
-        }
-      });
-  };
-
-  return {
-    enqueue(outcome: TimedCronRunOutcome) {
-      pendingOutcomes.push(outcome);
-      startDrain();
-    },
-    async flush(): Promise<TimedCronRunOutcome[]> {
-      for (;;) {
-        const pendingDrain = drainPromise;
-        if (!pendingDrain) {
-          break;
-        }
-        await pendingDrain;
-      }
-      if (drainFailure) {
-        throw drainFailure.error;
-      }
-      return finalizedOutcomes.splice(0);
-    },
-  };
-}
 
 /** Durably finalizes finished work without waiting for unrelated cron runs. */
 export async function finalizeCompletedCronRunOutcomes(
@@ -185,7 +120,6 @@ export async function finalizeCompletedCronRunOutcomes(
         outcomes: finalizedOutcomes.map((outcome) => {
           const {
             activeJobMarker,
-            reservationIdentity: _reservationIdentity,
             runReceiptContext: _runReceiptContext,
             request,
             ...completed
@@ -199,6 +133,7 @@ export async function finalizeCompletedCronRunOutcomes(
             },
             request: request && {
               preserveCadence: request.preserveCadence,
+              onExitWatcherCompletion: request.onExitWatcherCompletion,
               scheduleOwnershipAtMs: request.scheduleOwnershipAtMs,
             },
           };
@@ -261,19 +196,26 @@ export async function finalizeCompletedCronRunOutcomes(
       publishCronRuntimeRows(state);
       try {
         const requestOutcome = finalizedOutcomes.find((outcome) => outcome.request);
-        await recomputeUnownedCronSchedules(state, {
-          ...(opts?.repairFutureCronNextRunAtMs === false
-            ? { repairFutureCronNextRunAtMs: false }
-            : {}),
-          ...(requestOutcome
-            ? {
-                recomputeExpired: true,
-                ...(requestOutcome.request?.preserveCadence
-                  ? { preserveExpiredPacedNextRunJobId: requestOutcome.jobId }
-                  : {}),
-              }
-            : {}),
-        });
+        const nowMs = state.deps.nowMs();
+        if (
+          requestOutcome ||
+          state.store?.jobs.some((job) => needsCronTimerMaintenance(job, nowMs))
+        ) {
+          await recomputeUnownedCronSchedules(state, {
+            nowMs,
+            ...(opts?.repairFutureCronNextRunAtMs === false
+              ? { repairFutureCronNextRunAtMs: false }
+              : {}),
+            ...(requestOutcome
+              ? {
+                  recomputeExpired: true,
+                  ...(requestOutcome.request?.preserveCadence
+                    ? { preserveExpiredPacedNextRunJobId: requestOutcome.jobId }
+                    : {}),
+                }
+              : {}),
+          });
+        }
       } catch (error) {
         state.deps.log.warn(
           { err: String(error) },
@@ -314,26 +256,18 @@ export async function finalizeCompletedCronRunOutcomes(
         // A retired reservation's millisecond marker cannot identify a successor.
         // Keep its terminal fact and receipt for recovery if the guard rejects it.
         if (isCronActiveJobMarkerCurrent(stale.activeJobMarker)) {
-          if (stale.reservationIdentity) {
-            await supersedeActivatedCronRun({
-              state,
-              jobId: stale.jobId,
-              reservationIdentity: stale.reservationIdentity,
-              runReceipt: stale.runReceipt,
-              runReceiptContext: stale.runReceiptContext,
-              reason: error.message,
-            });
-          } else {
-            await finishCronRunReceiptAsync(
-              {
-                handle: stale.runReceipt,
+          await runOpenClawStateWorkerOperation(stale.runReceiptContext, (scope) =>
+            scope.execute({
+              type: "cron.cancelRequests",
+              input: {
+                storeKey: stale.runReceipt!.storeKey,
+                receiptIds: [stale.runReceipt!.receiptId],
+                nowMs: state.deps.nowMs(),
+                reason: error.message,
                 status: "superseded",
-                finishedAtMs: state.deps.nowMs(),
-                error: error.message,
               },
-              stale.runReceiptContext,
-            );
-          }
+            }),
+          );
         }
         await emitMissingRequestedCronRunTerminal(state, stale);
         const remaining = outcomes.filter((outcome) => outcome !== stale);
@@ -343,9 +277,6 @@ export async function finalizeCompletedCronRunOutcomes(
     throw error;
   } finally {
     for (const outcome of outcomes) {
-      if (outcome.reservationIdentity) {
-        releaseQueuedCronRun(state, outcome.jobId, outcome.reservationIdentity);
-      }
       if (opts?.clearOnFailure !== false || finalizationSucceeded) {
         if (outcome.request) {
           clearManualCronJobActive(state, outcome.jobId, outcome.activeJobMarker);

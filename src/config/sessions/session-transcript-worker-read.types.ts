@@ -119,6 +119,13 @@ export type SessionTranscriptMessagePresenceWorkerInput = Omit<
   kind: "transcript-message-presence";
 };
 
+export type SessionTranscriptStatsWorkerInput = Omit<
+  SessionTranscriptWatermarkWorkerInput,
+  "kind"
+> & {
+  kind: "transcript-stats";
+};
+
 export type SessionTranscriptDeltaWorkerInput = Omit<
   SessionTranscriptWatermarkWorkerInput,
   "kind"
@@ -183,7 +190,7 @@ export type SessionResetRecallWorkerInput = {
   admission?: UserTurnTranscriptAdmissionReceipt;
 };
 
-export type SessionEntryWorkerInput = {
+type SessionEntryWorkerRequest = {
   kind: "session-entry";
   absPath: string;
   options: Omit<BuildSessionEntryOptions, "onTranscriptMessage" | "parseYieldEveryLines"> & {
@@ -192,5 +199,10 @@ export type SessionEntryWorkerInput = {
     storePath: string;
   };
   admission?: UserTurnTranscriptAdmissionReceipt;
-  redaction: SensitiveTextRedactionSnapshot;
 };
+
+export type SessionEntryWorkerInput = SessionEntryWorkerRequest &
+  (
+    | { mode?: "entry"; redaction: SensitiveTextRedactionSnapshot }
+    | { mode: "snapshot"; includeOriginalMessages: boolean }
+  );

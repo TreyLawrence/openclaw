@@ -47,9 +47,7 @@ import {
   CronRunReceiptConflictError,
   CronRunReceiptRevisionError,
   findActiveCronRunReceiptInDatabase,
-  finishCronRunReceiptAsync,
   listActiveCronRunReceiptJobIdsInDatabase,
-  prepareCronRunReceiptClaim,
   releaseLocalCronRunReceiptOwnership,
 } from "./run-receipt-store.js";
 import {
@@ -57,6 +55,8 @@ import {
   claimCronRunReceiptInDatabaseForTest,
   inspectActiveCronRunReceipt,
   makeCronReceiptJob,
+  finishCronRunReceiptAsync,
+  prepareCronRunReceiptClaim,
 } from "./run-receipt-store.test-support.js";
 import {
   isCronRunTriggerStateRetiredInDatabase,
@@ -378,9 +378,6 @@ describe("cron run receipt store", () => {
         }
       } finally {
         admission.close();
-        if (state.timer) {
-          state.timer.cancel();
-        }
         await finishCronRunReceiptAsync({
           handle: receipt,
           status: "ok",
@@ -829,6 +826,7 @@ describe("cron run receipt store", () => {
       activateCronRunReceiptInDatabase({
         database: db,
         handle: foreign.handle,
+        job,
         startedAtMs: Date.now(),
         resolveAgentId: () => job.agentId!,
       }),

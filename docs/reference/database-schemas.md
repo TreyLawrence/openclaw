@@ -23,6 +23,14 @@ CLI, Doctor, cron, and plugin child processes must route mutations through the
 Gateway or acquire exclusive ownership while it is stopped. First admission,
 migration, repair, and final live-authority checks retain their existing owners.
 
+Agent deletion status is loaded on first admission and retained per agent in the
+physical shared database's process-owned facts. Journal writers publish pending,
+completed, and removed status at commit through the existing worker fact transport;
+rollback preserves the previous status. Session admission reuses this fact and the
+deletion owner's queue closure instead of reading the journal on every turn.
+Restart loads persisted tombstones again. Destructive cleanup retains its current
+journal-authority checks; schema, retention, and update behavior are unchanged.
+
 Once Gateway startup holds exclusive state ownership, it inspects the previous
 Gateway lease directly in a read-only worker instead of copying the shared
 database. Fresh or unverifiable owners still prevent startup; Doctor's schema
@@ -75,7 +83,11 @@ SQLite format, schema-version, integrity, canonical-index, and
 table-existence validation runs once per physical database per process load,
 on its first admission. The admitted facts are shared with all workers and
 handles, including later opens and reopens after idle close. File identity uses
-volume, inode, and stable birthtime checked with `fstat`, not SQL. A replaced or
+volume, inode, and stable birthtime captured once with `fstat` on the retained
+admission descriptor, not SQL. Admission lookups and established borrowers reuse
+those shared facts without checking the pathname again. Native open and reopen
+still identify replacement files, and creation witnesses retain their physical
+file check. A replaced or
 restored file needs its own first validation. Migration and repair owners validate
 their changes and publish the new facts after successful DDL settlement; later
 runtime consumers do not recheck them. Doctor and explicit verification retain
@@ -224,6 +236,14 @@ use the existing primary key and require no schema or data migration.
 Session entry writes batch their saved snapshot fields in one upsert, preserving
 per-field revision triggers and rollback.
 
+Entry replacement snapshots carry the transcript watermark alongside the existing
+window facts. Metadata writers return that token with their entry postimage;
+a transcript mutation in the same transaction supplies its newer committed token.
+Publication does not scan the transcript again. Exact message rewrites likewise
+return the generation minted by their writer. Detached edits still compare their
+prepared payload with the current row before writing. Schemas, stored bytes,
+retention, permissions, and update behavior are unchanged.
+
 Canonical main-key policy, external-supervision ownership, and the machine-owned
 TTS preference path are loaded once for the physical database and shared across
 handles and workers. Their owning writers publish committed replacements;
@@ -339,6 +359,7 @@ page that now holds the content.
 - <a id="creator-namespace-migration" />[Creator namespace migration](/reference/database-schemas/agent-schema-history#creator-namespace-migration)
 - <a id="participant-identity-migration" />[Participant identity migration](/reference/database-schemas/agent-schema-history#participant-identity-migration)
 - <a id="state-schema-history" />[State schema history](/reference/database-schemas/state-schema-history#state-schema-history)
+- <a id="state-schema-21" />[State schema 21](/reference/database-schemas/state-schema-history#state-schema-21)
 - <a id="state-schema-16" />[State schema 16](/reference/database-schemas/state-schema-history#state-schema-16)
 - <a id="state-schema-15" />[State schema 15](/reference/database-schemas/state-schema-history#state-schema-15)
 - <a id="state-schema-13" />[State schema 13](/reference/database-schemas/state-schema-history#state-schema-13)
@@ -350,6 +371,7 @@ page that now holds the content.
 - <a id="the-gateway-refuses-to-start-with-a-newer-schema-version-error" />[The Gateway refuses to start with a newer schema version error](/reference/database-schemas/integrity-and-recovery#the-gateway-refuses-to-start-with-a-newer-schema-version-error)
 - <a id="a-database-is-quarantined-after-integrity-verification-failed" />[A database is quarantined after integrity verification failed](/reference/database-schemas/integrity-and-recovery#a-database-is-quarantined-after-integrity-verification-failed)
 - <a id="downgrades-are-unsupported" />[Downgrades are unsupported](/reference/database-schemas/integrity-and-recovery#downgrades-are-unsupported)
+- <a id="example-state-schema-21-to-20" />[Example: state schema 21 to 20](/reference/database-schemas/integrity-and-recovery#example-state-schema-21-to-20)
 - <a id="example-state-schema-13-to-12" />[Example: state schema 13 to 12](/reference/database-schemas/integrity-and-recovery#example-state-schema-13-to-12)
 - <a id="example-state-schema-12-to-11" />[Example: state schema 12 to 11](/reference/database-schemas/integrity-and-recovery#example-state-schema-12-to-11)
 - <a id="example-state-schema-11-to-10" />[Example: state schema 11 to 10](/reference/database-schemas/integrity-and-recovery#example-state-schema-11-to-10)

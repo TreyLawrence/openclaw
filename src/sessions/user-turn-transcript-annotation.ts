@@ -9,12 +9,10 @@ import {
   type SessionTranscriptRuntimeTarget,
 } from "../config/sessions/session-accessor.js";
 import { rewritePreparedTranscriptMessageAtAnchor } from "../config/sessions/session-message-rewrite.js";
-import { sessionTranscriptIndexNeedsReconcile } from "../config/sessions/session-transcript-index.js";
 import { waitForSessionTranscriptProjection } from "../config/sessions/session-transcript-reconcile.js";
 import { sessionMatchesExpectedTranscriptTurn } from "../config/sessions/session-transcript-turn-state.js";
 import { getOwnedSessionTranscriptWriterFence } from "../config/sessions/transcript-write-context.js";
 import { sha256HexPrefixCore } from "../infra/crypto-digest.js";
-import { openOpenClawAgentDatabase } from "../state/openclaw-agent-db.js";
 import { isSameOpenClawAgentDatabasePath } from "../state/openclaw-agent-db.paths.js";
 import { getUserTurnTranscriptAdmissionOwner } from "./user-turn-transcript-admission.js";
 import type {
@@ -77,7 +75,7 @@ export function bindUserTurnTranscriptAnnotation(params: {
       throw new Error("current user admission is no longer available for native annotation");
     }
   };
-  const assertCurrent = () => {
+  const assertNativeCurrent = () => {
     assertLive();
     const current = loadSessionEntry({ ...target, readConsistency: "latest" });
     const { logicalTurnId: _logicalTurnId, role: _role, ...anchor } = admission;
@@ -92,10 +90,6 @@ export function bindUserTurnTranscriptAnnotation(params: {
       (fence?.expectedLifecycleRevision !== undefined &&
         current?.lifecycleRevision !== fence.expectedLifecycleRevision) ||
       current?.activeWriterRunId !== selected.activeWriterRunId ||
-      sessionTranscriptIndexNeedsReconcile(
-        openOpenClawAgentDatabase({ agentId: admission.agentId, path: admission.storePath }).db,
-        admission.sessionId,
-      ) ||
       !isDeepStrictEqual(readActiveTranscriptEntryAnchor(admission), anchor)
     ) {
       throw new Error("current user admission is no longer available for native annotation");
@@ -118,7 +112,7 @@ export function bindUserTurnTranscriptAnnotation(params: {
     ) {
       throw new Error("native prompt annotation requires complete provenance");
     }
-    assertCurrent();
+    assertLive();
     // This is the existing user-source fingerprint contract, including upstream prompt bytes.
     const fingerprint = sha256HexPrefixCore(
       JSON.stringify({
@@ -160,10 +154,10 @@ export function bindUserTurnTranscriptAnnotation(params: {
         active: "exact",
         expectedEntry: {
           lifecycleRevision: expectedLifecycleRevision,
-          activeWriterRunId: selected.activeWriterRunId ?? null,
+          activeWriterRunId: expectedWriterRunId ?? selected.activeWriterRunId ?? null,
         },
         assertCurrent: assertLive,
-        assertNativeCurrent: assertCurrent,
+        assertNativeCurrent,
       },
     );
     if (!verified) {
@@ -176,14 +170,14 @@ export function bindUserTurnTranscriptAnnotation(params: {
       owner.refresh({ ...admission }, rewritten.message);
       await waitForSessionTranscriptProjection(admission, params.abortSignal);
     }
-    assertCurrent();
+    assertLive();
     if (rewritten) {
       await publishTranscriptUpdate(admission, {
         message: rewritten.message,
         messageId: admission.entryId,
         messageSeq: admission.activeMessagePosition + 1,
       });
-      assertCurrent();
+      assertLive();
     }
   };
 }

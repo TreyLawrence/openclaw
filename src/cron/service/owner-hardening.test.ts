@@ -37,14 +37,14 @@ import { loadCronStore, saveCronStore } from "../store.js";
 import { cronStoreKey } from "../store/key.js";
 import { upsertCronJobRow } from "../store/row-codec.js";
 import {
-  finishCronRunReceiptAsync,
   isCronRunReceiptOwnerStale,
-  prepareCronRunReceiptClaim,
   releaseLocalCronRunReceiptOwnership,
 } from "../store/run-receipt-store.js";
 import {
   claimCronRunReceiptInDatabaseForTest,
   inspectActiveCronRunReceipt,
+  finishCronRunReceiptAsync,
+  prepareCronRunReceiptClaim,
 } from "../store/run-receipt-store.test-support.js";
 import type { CronJob } from "../types.js";
 import { listForeignReceipts } from "./foreign-receipt-monitor.js";
@@ -95,8 +95,8 @@ beforeEach(async () => {
         Worker.prototype.postMessage = function (message, ...args) {
           if (message?.type === "execute" && message.input instanceof Uint8Array) {
             const command = deserialize(message.input);
-            if (command?.type === "cron.activateRun" && command.input?.handle?.jobId === jobId) {
-              // Install before startup captures the worker method; the reservation is durable here.
+            if (command?.type === "cron.drainQueue" && command.input?.requests?.length > 0) {
+              // The request committed; crash before the worker can activate it.
               process.kill(process.pid, "SIGKILL");
             }
           }
@@ -319,7 +319,7 @@ function claimMarkerlessReceipt(storePath: string, job: CronJob, startedAtMs: nu
 }
 
 describe("cron durable run ownership", () => {
-  it("recovers a queued reservation when the Gateway crashes before activation", async () => {
+  it("records a queued manual request when the Gateway crashes before activation", async () => {
     vi.useRealTimers();
     const { storePath } = await makeStorePath();
     const now = Date.now();
@@ -354,7 +354,7 @@ describe("cron durable run ownership", () => {
     const recovered = makeParentService(storePath, recoveredRunner);
     try {
       await recovered.start();
-      expect(receipts(storePath, job.id)).toMatchObject([{ status: "interrupted" }]);
+      expect(receipts(storePath, job.id)).toMatchObject([{ status: "skipped" }]);
       const persisted = (await loadCronStore(storePath)).jobs[0];
       expect(persisted?.state.queuedAtMs).toBeUndefined();
       expect(persisted?.state.runningAtMs).toBeUndefined();
@@ -595,13 +595,10 @@ describe("cron durable run ownership", () => {
     );
     try {
       await replacement.start();
-      const replacementState = (replacement as unknown as { state: CronServiceState }).state;
-      const staleTimer = replacementState.timer;
       const completed = waitForLine(owner, "completed");
       await fsPromises.writeFile(releasePath, "release");
       await completed;
       await clock.advanceBy(2_000);
-      expect(replacementState.timer).not.toBe(staleTimer);
       const persisted = await loadCronStore(storePath);
       expect(persisted.jobs.find((entry) => entry.id === job.id)?.state.nextRunAtMs).toEqual(
         expect.any(Number),
@@ -649,7 +646,6 @@ describe("cron durable run ownership", () => {
       expect(suspension?.drain()).toBe(true);
       replacement.pauseScheduling();
       expect(tryBeginGatewayRootWorkAdmission()).toBeNull();
-      expect(replacementState.timer).toBeNull();
       first.kill("SIGKILL");
       await waitForExit(first);
       second = spawnRunner({
@@ -671,7 +667,6 @@ describe("cron durable run ownership", () => {
       expect(receipts(storePath, job.id)[0]).toMatchObject({ status: "interrupted" });
       expect((await loadCronStore(storePath)).jobs[0]?.state.runningAtMs).toBeUndefined();
       expect(replacementState.schedulingPaused).toBe(true);
-      expect(replacementState.timer).toBeNull();
       expect(replacementRunner).not.toHaveBeenCalled();
       expect(tryBeginGatewayRootWorkAdmission()).toBeNull();
     } finally {

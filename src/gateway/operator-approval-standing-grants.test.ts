@@ -11,11 +11,11 @@ import {
   loadedCronStoreFromRows,
   upsertCronJobRow,
 } from "../cron/store/row-codec.js";
+import { releaseLocalCronRunReceiptOwnership } from "../cron/store/run-receipt-store.js";
 import {
+  claimCronRunReceiptInDatabaseForTest,
   prepareCronRunReceiptClaim,
-  releaseLocalCronRunReceiptOwnership,
-} from "../cron/store/run-receipt-store.js";
-import { claimCronRunReceiptInDatabaseForTest } from "../cron/store/run-receipt-store.test-support.js";
+} from "../cron/store/run-receipt-store.test-support.js";
 import type { CronRunReceiptHandle } from "../cron/store/run-receipt.types.js";
 import type { CronStoredJob } from "../cron/types.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
@@ -41,9 +41,9 @@ import { observeMainThreadSql } from "../test-utils/main-thread-sql-spies.test-s
 import { ExecApprovalManager } from "./exec-approval-manager.js";
 import {
   buildCronExecOperationBinding,
-  mintCronStandingGrantLocked,
   parseCronExecOperationBinding,
 } from "./operator-approval-standing-grants.js";
+import { mintCronStandingGrantLocked } from "./operator-approval-standing-grants.worker.js";
 import {
   closeOrphanedOperatorApprovals,
   listCronStandingGrants,
@@ -53,8 +53,8 @@ import {
   validateCronStandingGrant,
   consumeCronStandingGrant,
 } from "./operator-approval-store.js";
-import { insertOperatorApprovalInDatabase as insertOperatorApprovalNative } from "./operator-approval-store.kernel.js";
-import { resolveOperatorApprovalInDatabase as resolveOperatorApprovalNative } from "./operator-approval-store.transitions.js";
+import { insertOperatorApprovalInDatabase as insertOperatorApprovalNative } from "./operator-approval-store.kernel.worker.js";
+import { resolveOperatorApprovalInDatabase as resolveOperatorApprovalNative } from "./operator-approval-store.transitions.worker.js";
 
 type StandingGrantDatabase = Pick<
   OpenClawStateKyselyDatabase,
