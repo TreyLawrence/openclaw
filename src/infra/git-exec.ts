@@ -23,6 +23,11 @@ import {
 import { startGitOperationTiming } from "./git-operation-timing.js";
 
 export const GIT_TIMEOUT_MS = 120_000;
+
+export class GitCommandTimeoutError extends Error {
+  override name = "GitCommandTimeoutError";
+}
+
 // Keep live writers ordered across runtime chunks and shutdown. Settled tails
 // remove themselves; resetting this queue would release already-owned cleanup.
 const gitRefMutations = resolveGlobalSingleton(
@@ -140,6 +145,8 @@ export type GitCommandOptions = Pick<
   | "maxOutputBytes"
   | "terminateOnOutputLimit"
 > & {
+  /** Canonical ref owner when content commands use a temporary safe configuration view. */
+  refMutationDirectory?: string;
   /** Yield CPU to foreground Gateway work for content-heavy background reads. */
   lowerPriority?: boolean;
   operation?: GitProcessOperation;
@@ -205,6 +212,7 @@ async function executeGitCommandWithOutput<Result extends SpawnResult | BufferSp
 }
 
 export type GitBufferedCommandOptions = BufferedCommandOptions & {
+  refMutationDirectory?: string;
   lowerPriority?: boolean;
   beforeRun?: () => void;
   startRun?: GitOperationStarter;
@@ -239,7 +247,9 @@ export function createGitCommandError(
     timeoutMs,
   });
   if (result.termination === "timeout") {
-    error.message += `\nGit did not finish within its ${timeoutMs / 1000}s budget; check remote reachability, repository locks, and clone shape (partial clones fetch missing objects lazily).`;
+    return new GitCommandTimeoutError(
+      `${error.message}\nGit did not finish within its ${timeoutMs / 1000}s budget; check remote reachability, repository locks, and clone shape (partial clones fetch missing objects lazily).`,
+    );
   }
   return error;
 }
