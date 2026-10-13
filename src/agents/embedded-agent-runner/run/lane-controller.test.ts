@@ -1,6 +1,10 @@
 import { setImmediate as nextTurn, setTimeout as delay } from "node:timers/promises";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "../../../config/runtime-snapshot.js";
 import { getAgentEventLifecycleGeneration } from "../../../infra/agent-events.js";
 import {
   enqueueCommandInLane,
@@ -34,6 +38,7 @@ function createLaneController(params: {
     ...params.runOverrides,
     ...(params.enqueue ? { enqueue: params.enqueue } : {}),
   };
+  setRuntimeConfigSnapshot(runParams.config ?? {});
   let lifecycleGeneration = getAgentEventLifecycleGeneration();
 
   return createEmbeddedRunLaneController({
@@ -63,8 +68,13 @@ async function expectLaneCounts(lane: string, activeCount: number, queuedCount: 
 }
 
 describe("embedded run session lane", () => {
+  beforeEach(() => {
+    setRuntimeConfigSnapshot({});
+  });
+
   afterEach(() => {
     resetCommandQueueStateForTest();
+    clearRuntimeConfigSnapshot();
   });
 
   it("passes available run identity through session admission", async () => {
