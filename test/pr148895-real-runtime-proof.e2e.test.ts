@@ -249,10 +249,19 @@ describe("PR #148895 real runtime proof", () => {
             idempotencyKey: `pr148895-${label}`,
           });
           expect(started.status).toBe("started");
-          const waited = await rpc<{ status?: string }>("agent.wait", {
-            runId: started.runId,
-            timeoutMs: 60_000,
-          });
+          // agent.wait answers a queued turn immediately with status "pending"; keep
+          // observing the accepted run until it settles, like waitForAgentRunReply.
+          const deadline = performance.now() + 60_000;
+          let waited: { status?: string };
+          do {
+            waited = await rpc<{ status?: string }>("agent.wait", {
+              runId: started.runId,
+              timeoutMs: Math.max(1, Math.ceil(deadline - performance.now())),
+            });
+            if (waited.status === "pending") {
+              await delay(100);
+            }
+          } while (waited.status === "pending" && performance.now() < deadline);
           expect(waited).toMatchObject({ status: "ok" });
           proof("foreground_completed", { sessionKey, label, runId: started.runId });
         };
