@@ -1,5 +1,5 @@
 import { setImmediate as nextTurn, setTimeout as delay } from "node:timers/promises";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import {
   clearRuntimeConfigSnapshot,
@@ -68,10 +68,6 @@ async function expectLaneCounts(lane: string, activeCount: number, queuedCount: 
 }
 
 describe("embedded run session lane", () => {
-  beforeEach(() => {
-    setRuntimeConfigSnapshot({});
-  });
-
   afterEach(() => {
     resetCommandQueueStateForTest();
     clearRuntimeConfigSnapshot();
