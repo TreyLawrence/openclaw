@@ -352,11 +352,31 @@ describe("PR #148895 real runtime proof", () => {
             stopLatencyMs: Number((performance.now() - stopAt).toFixed(1)),
             ...snapshot(),
           });
-          const terminal = await rpc<{ status?: string }>("agent.wait", {
-            runId,
-            timeoutMs: 2_000,
-          });
+          // agent.wait answers a still-queued run with status "pending"; the Stop must
+          // reach a real terminal outcome inside the same bound, not merely return.
+          const stopDeadline = stopAt + 2_000;
+          let terminal: {
+            status?: string;
+            stopReason?: string;
+            endedAt?: number;
+            providerStarted?: boolean;
+          };
+          do {
+            terminal = await rpc<typeof terminal>("agent.wait", {
+              runId,
+              timeoutMs: Math.max(1, Math.ceil(stopDeadline - performance.now())),
+            });
+            if (terminal.status === "pending") {
+              await delay(25);
+            }
+          } while (terminal.status === "pending" && performance.now() < stopDeadline);
           const stopLatencyMs = performance.now() - stopAt;
+          expect(terminal).toMatchObject({
+            status: "error",
+            stopReason: "rpc",
+            providerStarted: false,
+          });
+          expect(terminal.endedAt).toEqual(expect.any(Number));
           expect(stopLatencyMs).toBeLessThan(2_000);
           proof("caller_terminal_while_held", {
             runId,
