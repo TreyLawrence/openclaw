@@ -74,12 +74,6 @@ suite.define(() => {
         const root = page.locator("html");
         await expect.poll(() => root.getAttribute("data-theme")).toBe(resolvedTheme);
 
-        // These ownerless fixture rows belong to All, not the current human's Mine scope.
-        await page.locator('[data-navigation-view="sessions"]').click();
-        await page
-          .locator(".sidebar-navigation-scope")
-          .getByRole("button", { name: "All", exact: true })
-          .click();
         const session = page.locator(`openclaw-app-sidebar [data-session-key="${sessionKey}"]`);
         await session.waitFor();
         await session.hover();
@@ -104,9 +98,9 @@ suite.define(() => {
 
         await page.goto(`${suite.server.baseUrl}settings/appearance`);
         await waitForControlUiSettingsTakeover(page);
-        const languageSelect = page.locator("#settings-language wa-select");
-        await languageSelect.click();
-        const listbox = languageSelect.locator('[part="listbox"]');
+        const languageSelect = page.locator("#settings-language openclaw-select-picker");
+        await languageSelect.locator(".picker-select__trigger").click();
+        const listbox = languageSelect.locator(".picker-select__menu");
         await listbox.waitFor({ state: "visible" });
         if (captureProof && theme === "claw") {
           await page.screenshot({

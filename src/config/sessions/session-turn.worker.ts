@@ -13,11 +13,12 @@ import { readOpenClawAgentDatabaseIdentity } from "../../state/openclaw-agent-db
 import { ensureSessionGoalOperationsSchema } from "../../state/openclaw-agent-goal-operations-schema.js";
 import type { AgentWorkerOperationContext } from "../../state/openclaw-agent-operation-context.js";
 import { runWithCliHistoryWriter } from "./cli-history-boundary.js";
-import { applySessionGoalOperation, readSessionGoalOperationReceipt } from "./goals-operations.js";
+import { applySessionGoalOperation } from "./goals-operation-policy.js";
+import { readSessionGoalOperationReceipt } from "./goals-operations.js";
 import {
   readSessionPendingInputWorkerReceipt,
-  resolveSessionPendingInputAppend,
   runWithSessionPendingInputWorkerCustody,
+  resolveSessionPendingInputAppend,
 } from "./session-accessor.sqlite-pending-inputs.js";
 import { prepareSessionEntryReplacementPublication } from "./session-accessor.sqlite-replacement-state.js";
 import { readCommittedTranscriptMessageSequence } from "./session-accessor.sqlite-transcript-sequences.js";
@@ -360,7 +361,7 @@ export function applySessionTurn<T>(
                     maintenancePlans: [],
                   },
                   database,
-                  { captureFullFacts: true },
+                  { captureFullFacts: true, postimages: committed.postimages },
                 )
               : undefined;
             const custodyEntry =

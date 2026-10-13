@@ -20,7 +20,8 @@ import { cleanupSolid, mountSolid } from "../../../test-helpers/mount-solid.ts";
 import { createSolidApplicationContextProvider } from "../../../test-helpers/solid-application-context.tsx";
 import type { DreamDiaryActionMethod, DreamingState, WikiOverview } from "./dreaming.ts";
 import { AgentMemoryState } from "./memory-panel-state.ts";
-import { AgentMemoryPanel, AgentMemoryView } from "./memory-panel.tsx";
+import { AgentMemoryView } from "./memory-panel-view.tsx";
+import { AgentMemoryPanel } from "./memory-panel.tsx";
 import type { DreamingViewState } from "./view.tsx";
 
 vi.mock("../../../components/confirm-dialog.ts", () => ({ showConfirmDialog: vi.fn() }));
@@ -876,18 +877,9 @@ describe.runIf(process.env.OPENCLAW_UI_MEMORY_CHROMIUM_E2E === "1")(
         await gateway.closeLatest(1001, "proxy idle timeout");
         await gateway.setOnline(false);
         await expect
-          .poll(
-            () =>
-              page.evaluate(
-                () =>
-                  (
-                    document.querySelector("openclaw-app") as HTMLElement & {
-                      runtime?: { context: { gateway: { snapshot: { phase: string } } } };
-                    }
-                  ).runtime?.context.gateway.snapshot.phase,
-              ),
-            { timeout: 15_000 },
-          )
+          .poll(() => page.evaluate(() => window.openclawControlUi?.snapshot().gatewayPhase), {
+            timeout: 15_000,
+          })
           .toBe("reconnecting");
         await expect
           .poll(() => gateway.getSocketCount(), { timeout: 15_000 })

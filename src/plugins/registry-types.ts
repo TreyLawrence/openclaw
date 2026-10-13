@@ -120,6 +120,7 @@ export type PluginToolRegistration = PluginRegistrationOwner & {
   names: string[];
   declaredNames?: ReadonlySet<string>;
   optional: boolean;
+  workspaceAccess?: boolean | "execute";
   /** Loader-owned provenance. Missing values are conservative legacy registrations. */
   origin?: PluginOrigin;
 };

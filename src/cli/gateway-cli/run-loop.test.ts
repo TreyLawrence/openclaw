@@ -496,6 +496,7 @@ describe("runGatewayLoop", () => {
                 : [],
             );
             expect(close).toHaveBeenCalledWith({
+              retainSharedState: true,
               reason: "gateway stopping",
               restartExpectedMs: null,
             });
@@ -634,6 +635,7 @@ describe("runGatewayLoop", () => {
       sigterm();
       await expect(exited).resolves.toBe(0);
       expect(closeThird).toHaveBeenCalledWith({
+        retainSharedState: true,
         reason: "gateway stopping",
         restartExpectedMs: null,
       });
@@ -654,7 +656,7 @@ describe("runGatewayLoop", () => {
         "expected SIGUSR2 to trigger restart",
       );
 
-      expect(abortActiveCronTaskRuns).toHaveBeenCalledWith("Gateway restarting.");
+      expect(abortActiveCronTaskRuns).toHaveBeenCalledWith(undefined);
       expect(waitForActiveCronTaskRuns).toHaveBeenCalledWith(1_000);
       expect(waitForActiveCronJobs).toHaveBeenCalledWith(1_000);
       expect(advanceCronActiveJobGeneration).toHaveBeenCalledTimes(1);
@@ -801,7 +803,10 @@ describe("runGatewayLoop", () => {
           outcome: "forced_stop",
           reason: "gateway.restart_startup_request_timeout",
         });
-        expect(close).toHaveBeenCalledExactlyOnceWith({ reason: "gateway stopping" });
+        expect(close).toHaveBeenCalledExactlyOnceWith({
+          retainSharedState: true,
+          reason: "gateway stopping",
+        });
         expect(start).toHaveBeenCalledTimes(1);
         expect(gatewayLog.error).toHaveBeenCalledWith(
           "startup restart request timed out before gateway returned a close handle; exiting for supervisor recovery",
@@ -1121,7 +1126,13 @@ describe("runGatewayLoop", () => {
         .mockResolvedValueOnce({
           release: lockRelease,
         })
-        .mockRejectedValueOnce(new Error("lock timeout"));
+        .mockRejectedValueOnce(
+          new Error("failed to acquire gateway state ownership", {
+            cause: new Error("owner lease inspection failed", {
+              cause: new Error("fixture native read failed"),
+            }),
+          }),
+        );
 
       restartGatewayProcessWithFreshPid.mockReturnValueOnce({
         mode: "disabled",
@@ -1135,7 +1146,7 @@ describe("runGatewayLoop", () => {
       expect(acquireGatewayLock).toHaveBeenCalledTimes(2);
       expect(start).toHaveBeenCalledTimes(1);
       expect(gatewayLog.error).toHaveBeenCalledWith(
-        "failed to reacquire gateway lock for in-process restart: Error: lock timeout",
+        "failed to reacquire gateway lock for in-process restart: failed to acquire gateway state ownership | owner lease inspection failed | fixture native read failed",
       );
     });
   });
@@ -1403,6 +1414,7 @@ describe("runGatewayLoop", () => {
         "failed to handle SIGTERM: Error: dynamic import failed",
       );
       expect(close).toHaveBeenCalledWith({
+        retainSharedState: true,
         reason: "gateway stopping",
         restartExpectedMs: null,
       });

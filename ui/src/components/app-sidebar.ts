@@ -29,11 +29,11 @@ import { SETTINGS_ROUTE_TARGETS } from "../pages/config/route-data.ts";
 import { renderPluginSurface } from "../plugins/control-ui-view.ts";
 import { sidebarOnlineOrder, renderAppSidebarOnline } from "./app-sidebar-online.ts";
 import "../styles/sidebar-rail.css";
-import { renderSidebarRail, renderSidebarPages, renderSidebarScope } from "./app-sidebar-rail.ts";
-import { renderAppSidebarBrand } from "./app-sidebar-render.ts";
+import { renderSidebarRail, renderSidebarPages } from "./app-sidebar-rail.ts";
 import type { SessionCatalogGroupsRenderer } from "./app-sidebar-session-catalog-render.ts";
 import "../styles/app-sidebar.css";
 import type { CatalogSessionMenuRequest } from "./app-sidebar-session-catalogs.ts";
+import { renderSessionListToolbar } from "./app-sidebar-session-filter-summary.ts";
 import { renderSessionList } from "./app-sidebar-session-list-render.ts";
 import type {
   SidebarNarrationSyncInput,
@@ -64,6 +64,11 @@ import {
 import { icons } from "./icons.ts";
 import { renderPanelRefreshStatus } from "./panel-refresh-status.ts";
 import { SessionOrganizerController } from "./session-organizer-controller.ts";
+import {
+  renderSidebarAgentRoster,
+  renderSidebarNewSessionMenu,
+  renderSidebarPinnedSession,
+} from "./sidebar-agent-roster.ts";
 import { SidebarContextController } from "./sidebar-context-controller.ts";
 import { SidebarMenusController } from "./sidebar-menus-controller.ts";
 import { SidebarPeopleController } from "./sidebar-people-controller.ts";
@@ -85,7 +90,6 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
   restoreSidebarSnapshot(model: SidebarSnapshotModel): void {
     this.sidebarSnapshot = model;
     this.navigationView = model.navigationView;
-    this.navigationScope = model.navigationScope;
     this.sessionOrganizer.collapsedSessionSections = new Set(model.collapsedSections);
     const rows = [...model.sessions, ...model.sections.flatMap((section) => section.rows)];
     for (const row of rows) {
@@ -96,13 +100,13 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
     this.people.statusFilter = model.peopleStatusFilter;
     this.teamOnlineExpanded = model.onlineExpanded;
     sidebarOnlineOrder(this).restore(model.onlineUsers, new Map(model.onlineCounts));
-    if (model.mode === "roster") {
-      void this.rosterRendererImport.load().catch(() => undefined);
-    }
   }
 
   releaseSidebarSnapshot(): void {
     const snapshot = this.sidebarSnapshot;
+    if (snapshot) {
+      this.pinnedSessions.seed(snapshot.pinnedSessions);
+    }
     this.sidebarPluginSnapshot =
       snapshot && this.context?.plugins.registryStatus !== "complete"
         ? { entries: snapshot.entries, plugins: snapshot.plugins }
@@ -124,11 +128,9 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
     if (!this.connected || !context) {
       return false;
     }
-    if (context.gateway.snapshot.selfUser?.id && !this.navigationCatalog.scopesReady) {
-      return false;
-    }
-    if (this.navigationView === "pages" && this.navigationCatalog.dashboards?.loading !== false) {
-      return false;
+    if (this.navigationView === "pages") {
+      const pages = this.navigationCatalog.dashboards;
+      return pages?.loading === false && (pages.readSucceeded === true || pages.error !== null);
     }
     const people = sidebarOnlineOrder(this).users;
     if (
@@ -141,7 +143,6 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
     if (this.sidebarAgentsMode === "roster") {
       const roster = rosterActivityStore(context).snapshot;
       return (
-        Boolean(this.rosterRenderer) &&
         (roster.membershipReady || roster.error !== null) &&
         !roster.loading &&
         roster.involvingMe === this.sidebarSessionOwnerFilter().involvingMe
@@ -230,7 +231,10 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
       () => this.context?.gateway,
       (gateway) => gateway.subscribeEvents((event) => this.narration?.handleEvent(event)),
     )
-    .watchStore(() => this.context?.agentIdentity)
+    .effect(
+      () => this.context?.agentIdentity,
+      (identity) => identity.subscribe(this.sessionData.requestSessionDataUpdate),
+    )
     .watchStore(
       () => this.context?.theme,
       () => this.syncCommunityInviteState(),
@@ -239,7 +243,10 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
       () => this.context?.config,
       () => this.syncCommunityInviteState(),
     )
-    .watchStore(() => this.context?.plugins);
+    .effect(
+      () => this.context?.plugins,
+      (plugins) => plugins.subscribe(this.sessionData.requestSessionDataUpdate),
+    );
   private readonly nativeGatewaysChanged = () => this.sidebarMenus.closeSessionMenu();
   private readonly hiddenSessionCatalogsChanged = () => {
     this.hiddenSessionCatalogIds = loadStoredHiddenSessionCatalogIds();
@@ -263,14 +270,6 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
       }
     },
   );
-  private rosterRenderer: typeof import("./sidebar-agent-roster.ts") | null = null;
-  private readonly rosterRendererImport = createIdleImport(
-    () => import("./sidebar-agent-roster.ts"),
-    (module) => {
-      this.rosterRenderer = module;
-      this.requestUpdate();
-    },
-  );
   @state() catalogProjectGrouping = loadStoredSidebarCatalogGrouping();
 
   constructor() {
@@ -284,7 +283,6 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
   }
 
   override disconnectedCallback() {
-    this.rosterRendererImport.dispose();
     window.removeEventListener("openclaw:native-gateways-changed", this.nativeGatewaysChanged);
     window.removeEventListener(
       SIDEBAR_HIDDEN_SESSION_CATALOGS_CHANGED_EVENT,
@@ -546,8 +544,8 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
 
   renderPinnedSidebarSession(session: SidebarRecentSession): TemplateResult {
     // Pinned sessions live in the navigation zone, not a session list.
-    return this.sidebarAgentsMode === "roster" && this.rosterRenderer
-      ? this.rosterRenderer.renderSidebarPinnedSession(this, session)
+    return this.sidebarAgentsMode === "roster"
+      ? renderSidebarPinnedSession(this, session)
       : renderSessionTree({ host: this, session, listItem: false });
   }
 
@@ -565,11 +563,7 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
 
   private renderSessionsBody() {
     if (this.sidebarAgentsMode === "roster") {
-      if (!this.rosterRenderer) {
-        void this.rosterRendererImport.load().catch(() => undefined);
-        return nothing;
-      }
-      return this.rosterRenderer.renderSidebarAgentRoster(
+      return renderSidebarAgentRoster(
         this,
         this.zonedVisibleSections(this.selectedAgentSessionRows(this.getSessionNavigationState()))
           .sections,
@@ -622,10 +616,7 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
   }
 
   override render() {
-    if (
-      this.sidebarSnapshotController.pending ||
-      (this.sidebarSnapshot?.mode === "roster" && !this.rosterRenderer)
-    ) {
+    if (this.sidebarSnapshotController.pending) {
       return nothing;
     }
     return html`
@@ -644,12 +635,6 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
       >
         ${renderSidebarRail(this)}
         <div class="sidebar-shell" @mousedown=${beginNativeWindowDragFromTopInset}>
-          ${renderAppSidebarBrand(
-            this,
-            this.sidebarAgentsMode === "roster"
-              ? this.rosterRenderer?.renderSidebarNewSessionMenu(this)
-              : nothing,
-          )}
           <div class="sidebar-shell__content">
             <div
               class="sidebar-shell__body sidebar-shell__body--scroll-${this.sessionData.sessionsScrollState}"
@@ -661,7 +646,7 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
                   : this.navigationView === "online"
                     ? renderAppSidebarOnline(this)
                     : html`
-                        ${renderSidebarScope(this)}
+                        ${renderSessionListToolbar(this, this.sidebarAgentsMode === "roster" ? renderSidebarNewSessionMenu(this) : undefined)}
                         <div
                           class="sidebar-session-content"
                           ?hidden=${Boolean(this.contextualSidebar)}

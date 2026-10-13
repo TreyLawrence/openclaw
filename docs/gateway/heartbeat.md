@@ -28,6 +28,8 @@ Heartbeat-owned event wakes retain the same per-agent rate limits when recurring
 
 Transcript markers distinguish `[OpenClaw heartbeat poll]` from an exec completion, cron wake, or session event. Scheduled polls use the configured heartbeat session, which is the agent's main session by default. Targeted completion events return to the session that owns the work. Event markers retain their source provenance without copying internal instructions into chat history. Silent acknowledgment pairs remain hidden.
 
+For a WebChat-only conversation, an exec completion can reply directly to its original conversation without an external messaging target. If that conversation is reset or replaced while the completion is being prepared, the old turn cannot publish into the new conversation. Explicit `target: "none"` still suppresses delivery.
+
 Troubleshooting: [Automations](/automation/cron-jobs#troubleshooting)
 
 ## Quick start (beginner)
@@ -106,6 +108,10 @@ string. `heartbeat.target` accepts `owner`, `last`, `none`, or a channel ID such
 
 ## What the heartbeat prompt is for
 
+Explicit speech-only replies keep their spoken text through heartbeat selection
+and speech synthesis, even when the visible reply is empty. They follow the same
+delivery target and visibility settings as other heartbeat alerts.
+
 The default prompt is intentionally narrow: follow the heartbeat monitor scratch
 context when provided, keep recurring work in automation jobs, and reply
 `NO_REPLY` when nothing needs attention. It explicitly tells the agent
@@ -123,7 +129,7 @@ Proactive heartbeat behavior is opt-in:
   night-time pings in your configured local timezone (see
   [Timezone](/concepts/timezone)).
 
-Heartbeat still handles node completion events. Host exec, CLI watchdog, ACP parent relay, immediate HTTP hooks, restart continuations, and session-state notices use ordinary session execution. A completion carrying a captured delivery route returns to that account, conversation, and thread; the monitor's configured `target`, `to`, or `accountId` cannot redirect it. Intentional `target: "none"`, direct-message restrictions, notification opt-outs, and disabled heartbeat controls still apply. Plugin normalization that would change the captured route fails closed. Ordinary scheduled heartbeats retain their configured destinations.
+Heartbeat still handles node completion events. Host exec, CLI watchdog, ACP parent relay, immediate HTTP hooks, restart continuations, and session-state notices use ordinary session execution. A completion carrying a captured delivery route returns to that account, conversation, and thread; the monitor's configured `target`, `to`, or `accountId` cannot redirect it. Intentional `target: "none"`, direct-message restrictions, notification opt-outs, and disabled heartbeat controls still apply. Plugin normalization that would change the captured route is rejected. Ordinary scheduled heartbeats retain their configured destinations.
 
 Heartbeat-owned node completions with different delivery routes run in separate turns, including different accounts or topics. Identical completion text does not suppress a different completion occurrence.
 

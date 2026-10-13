@@ -21,7 +21,7 @@ export type FilePreviewModalFile = {
   contents: string;
   message?: string;
 };
-export type FilePreviewModalProps = {
+type FilePreviewModalProps = {
   files: FilePreviewModalFile[];
   activePath: string;
   query: string;
@@ -39,7 +39,7 @@ export type FilePreviewModalProps = {
   error: string;
   notice: string;
 };
-export type OpenClawFilePreviewModal = SolidBridgeElement<FilePreviewModalProps>;
+type OpenClawFilePreviewModal = SolidBridgeElement<FilePreviewModalProps>;
 
 function MarkdownContent(props: { contents: string; onClick: (event: MouseEvent) => void }) {
   let article!: HTMLElement;
@@ -110,6 +110,12 @@ function FilePreviewContent(props: FilePreviewModalProps, host: OpenClawFilePrev
     host.dispatchEvent(new CustomEvent(name, { bubbles: true, composed: true, detail }));
   const close = () => emit("file-preview-close");
   const focusModal = () => {
+    if (
+      !host.isConnected ||
+      !host.querySelector<HTMLDialogElement>("openclaw-modal-dialog > dialog")?.open
+    ) {
+      return;
+    }
     const target =
       host.querySelector<HTMLElement>(".search") ??
       host.querySelector<HTMLElement>(".item.is-active, .button") ??
@@ -214,6 +220,7 @@ function FilePreviewContent(props: FilePreviewModalProps, host: OpenClawFilePrev
       class={["item", { "is-active": file.path === activeFile()?.path }]}
       data-path={file.path}
       aria-current={file.path === activeFile()?.path ? "true" : "false"}
+      autofocus={props.layout === "document" && file.path === activeFile()?.path}
       onPointerDown={preventItemPointerFocus}
       onMouseDown={preventItemPointerFocus}
       onClick={() => select(file.path)}
@@ -281,6 +288,7 @@ function FilePreviewContent(props: FilePreviewModalProps, host: OpenClawFilePrev
                   <span class="search-icon">⌕</span>
                   <input
                     class="search"
+                    autofocus
                     placeholder={props.searchPlaceholder || t("filePreview.searchPlaceholder")}
                     value={props.query}
                     onInput={(event) =>
@@ -296,6 +304,7 @@ function FilePreviewContent(props: FilePreviewModalProps, host: OpenClawFilePrev
                 class="close-button"
                 type="button"
                 aria-label={t("common.close")}
+                autofocus={props.loading || Boolean(props.error) || !activeFile()}
                 onClick={close}
               >
                 <Icon name="x" />
@@ -415,30 +424,26 @@ function FilePreviewContent(props: FilePreviewModalProps, host: OpenClawFilePrev
   );
 }
 
-export const FilePreviewModal = defineSolidBridge<FilePreviewModalProps>(
-  "openclaw-file-preview-modal",
-  FilePreviewContent,
-  {
-    properties: {
-      files: { default: [], attribute: false },
-      activePath: { default: "" },
-      query: { default: "" },
-      label: { default: "" },
-      listLabel: { default: "" },
-      searchPlaceholder: { default: "" },
-      contextLabel: { default: "" },
-      emptyTitle: { default: "" },
-      emptySubtitle: { default: "" },
-      copyLabel: { default: "" },
-      layout: { default: "files" },
-      directories: { default: [], attribute: false },
-      loading: { default: false },
-      fileLoading: { default: false },
-      error: { default: "" },
-      notice: { default: "" },
-    },
+defineSolidBridge<FilePreviewModalProps>("openclaw-file-preview-modal", FilePreviewContent, {
+  properties: {
+    files: { default: [], attribute: false },
+    activePath: { default: "" },
+    query: { default: "" },
+    label: { default: "" },
+    listLabel: { default: "" },
+    searchPlaceholder: { default: "" },
+    contextLabel: { default: "" },
+    emptyTitle: { default: "" },
+    emptySubtitle: { default: "" },
+    copyLabel: { default: "" },
+    layout: { default: "files" },
+    directories: { default: [], attribute: false },
+    loading: { default: false },
+    fileLoading: { default: false },
+    error: { default: "" },
+    notice: { default: "" },
   },
-);
+});
 
 function chunkFileContents(contents: string): string[] {
   const lines = contents.split("\n");

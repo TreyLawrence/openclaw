@@ -3,8 +3,15 @@
 import { render, type ReactiveElement } from "lit";
 import { expect, it, onTestFinished, vi } from "vitest";
 import "../test-helpers/app-sidebar-suite.ts";
+import {
+  createContext,
+  createGatewayHarness,
+  createSessions,
+} from "../test-helpers/app-sidebar.ts";
+import { createApplicationContextProvider } from "../test-helpers/application-context.ts";
+import { createTestGatewayClient } from "../test-helpers/gateway-client.ts";
 import { renderAppSidebarOnline } from "./app-sidebar-online.ts";
-import { renderAppSidebarBrand, type AppSidebarRenderHost } from "./app-sidebar-render.ts";
+import { renderSidebarAgentCard, type AppSidebarRenderHost } from "./app-sidebar-render.ts";
 import { projectSidebarSession } from "./app-sidebar-session-navigation.test-support.ts";
 import { renderRecentSession, type SessionListHost } from "./app-sidebar-session-row-render.ts";
 import { resolveSidebarSessionRowSubtitle } from "./session-row-subtitle.ts";
@@ -16,14 +23,13 @@ import {
   type SidebarSnapshotModel,
 } from "./sidebar-snapshot-model.ts";
 import "./app-sidebar.ts";
+import { installTitleTooltips } from "./tooltip-title.ts";
 
 const emptySnapshot: SidebarSnapshotModel = {
   routingDefaults: { mainKey: "main", scope: "per-sender" },
   roster: null,
   mode: "chip",
   navigationView: "sessions",
-  navigationScope: "all",
-  scopesEquivalent: false,
   pages: [],
   pageScopeId: null,
   pinnedSessions: [],
@@ -59,6 +65,52 @@ function createHost() {
   return { host, container };
 }
 
+it("paints the restored roster and workspace in the first sidebar update", async () => {
+  const { host } = createHost();
+  host.sidebarAgentsMode = "chip";
+  host.sidebarLiveActivity = false;
+  const gateway = createGatewayHarness(createTestGatewayClient(async () => ({})));
+  gateway.publish({ client: null, phase: "connecting", hello: null });
+  const context = createContext(gateway.gateway, createSessions("main", []));
+  const provider = createApplicationContextProvider(context);
+  provider.append(host);
+  document.body.append(provider);
+  await host.updateComplete;
+
+  host.restoreSidebarSnapshot({
+    ...emptySnapshot,
+    mode: "roster",
+    cards: [{ id: "main", name: "Harbor", mainKey: "agent:main:main", textAvatar: "⚓" }],
+  });
+  host.requestUpdate();
+  await host.updateComplete;
+
+  expect(host.querySelector('aside[data-snapshot-state="cached"]')).not.toBeNull();
+  const roster = host.querySelector<ReactiveElement>("openclaw-sidebar-agent-roster");
+  expect(roster).not.toBeNull();
+  await roster!.updateComplete;
+  expect(host.querySelector('[data-agent-group="main"]')?.textContent).toContain("Harbor");
+  expect(host.querySelector('[data-avatar="⚓"]')).not.toBeNull();
+});
+
+it("materializes the archive hint on hover without changing the action name", () => {
+  vi.useFakeTimers();
+  onTestFinished(installTitleTooltips(document));
+  const { host, container } = createHost();
+  const session = projectSidebarSession({ key: "agent:main:thread", label: "Research" });
+  render(renderRecentSession({ host, session }), container);
+  const archive = container.querySelector<HTMLButtonElement>("[data-sidebar-session-archive]")!;
+  const name = archive.getAttribute("aria-label");
+  const hint = archive.title;
+  expect(hint).not.toBe("");
+  expect(container.querySelector("openclaw-tooltip")).toBeNull();
+
+  archive.dispatchEvent(new MouseEvent("pointerover", { bubbles: true }));
+  const tooltip = document.querySelector("openclaw-tooltip");
+  expect(tooltip?.content).toBe(hint);
+  expect(archive.getAttribute("aria-label")).toBe(name);
+});
+
 it("renders the saved chip identity before agent discovery without reviving another agent's chip", async () => {
   const { host, container } = createHost();
   host.sidebarAgentsMode = "chip";
@@ -68,15 +120,17 @@ it("renders the saved chip identity before agent discovery without reviving anot
     ...emptySnapshot,
     brand: { ...emptySnapshot.brand, agentId: "main", name: "Harbor", textAvatar: "⚓" },
   });
-  render(renderAppSidebarBrand(host), container);
+  render(renderSidebarAgentCard(host), container);
   const card = container.querySelector<ReactiveElement>("openclaw-sidebar-agent-card");
   expect(card).not.toBeNull();
   await card!.updateComplete;
   expect(container.querySelector(".sidebar-workspace-header")).toBeNull();
-  expect(card!.querySelector(".sidebar-agent-card__name")?.textContent).toContain("Harbor");
+  expect(card!.querySelector(".sidebar-agent-card__main")?.getAttribute("aria-label")).toContain(
+    "Harbor",
+  );
   expect(card!.querySelector("[data-avatar='⚓']")).not.toBeNull();
   host.sessionKey = "agent:other:thread";
-  render(renderAppSidebarBrand(host), container);
+  render(renderSidebarAgentCard(host), container);
   expect(container.querySelector("openclaw-sidebar-agent-card")).toBeNull();
   expect(container.querySelector(".sidebar-workspace-header")).not.toBeNull();
 });

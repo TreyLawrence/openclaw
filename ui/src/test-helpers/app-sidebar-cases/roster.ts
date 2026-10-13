@@ -1,3 +1,4 @@
+import type { LitElement } from "lit";
 import { describe, expect, it, vi } from "vitest";
 import {
   BUILTIN_THEMES,
@@ -321,6 +322,9 @@ describe("AppSidebar agent roster", () => {
     const menus = sidebar.querySelectorAll(".sidebar-new-session-menu");
     expect(menus).toHaveLength(1);
     for (const menu of menus) {
+      expect(menu.querySelectorAll("wa-dropdown-item")).toHaveLength(0);
+      menu.dispatchEvent(new Event("wa-show"));
+      await sidebar.querySelector<LitElement>("openclaw-sidebar-new-session-menu")?.updateComplete;
       const options = [...menu.querySelectorAll("wa-dropdown-item")];
       expect(options.map((item) => item.getAttribute("value"))).toEqual(agentIds(sidebar));
       expect(options.map((item) => item.querySelector("a")?.getAttribute("href"))).toEqual(
@@ -542,11 +546,11 @@ describe("AppSidebar agent roster", () => {
     await vi.waitFor(() =>
       expect(agentIds(sidebar)).toEqual(agents.agents.map((agent) => agent.id)),
     );
-    expect(sidebar.querySelector(".sidebar-session-toolbar")).toBeNull();
-    expect(sidebar.querySelectorAll(".sidebar-brand__actions .sidebar-session-sort")).toHaveLength(
+    expect(sidebar.querySelectorAll(".sidebar-session-toolbar")).toHaveLength(1);
+    expect(sidebar.querySelectorAll(".sidebar-session-toolbar .sidebar-session-sort")).toHaveLength(
       1,
     );
-    expect(sidebar.querySelector(".sidebar-sessions .sidebar-session-sort")).toBeNull();
+    expect(sidebar.querySelectorAll(".sidebar-session-owner-filter")).toHaveLength(1);
   });
 
   it("remembers collapsed agents after remount and keeps chip mode scoped to one agent", async () => {

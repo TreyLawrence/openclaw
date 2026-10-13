@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import {
   createSqliteQueryCache,
@@ -13,10 +12,7 @@ import {
   withSqliteDatabaseWriteScope,
 } from "../../infra/sqlite-database-admission.js";
 import { coerceRequiredSqliteNumber as sqliteNumber } from "../../infra/sqlite-number.js";
-import {
-  getSqliteReadScopeRevision,
-  type SqliteReadScopeRevision,
-} from "../../infra/sqlite-schema-facts.js";
+import { getSqliteReadScopeRevision } from "../../infra/sqlite-schema-facts.js";
 import { findOpenClawAgentDatabaseIdentity } from "../../state/openclaw-agent-db-identity.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import type { SessionTranscriptContextVersion } from "./session-accessor.sqlite-contract.js";
@@ -34,10 +30,13 @@ import {
   readSessionColdTranscript,
   SessionTranscriptColdError,
 } from "./session-cold-storage-state.js";
+import { deriveSessionPredicateColumns } from "./session-predicate-columns.js";
+import { publishSessionTranscriptAuthority } from "./session-transcript-authority.js";
+import type { SessionTranscriptAuthority } from "./session-transcript-authority.types.js";
 import {
-  publishSessionTranscriptAuthority,
-  type SessionTranscriptAuthority,
-} from "./session-transcript-authority.js";
+  readTranscriptContextFacts,
+  retainTranscriptContextFacts,
+} from "./session-transcript-context-facts.js";
 import {
   foldedSessionKeyAliasCandidates,
   normalizeStoreSessionKey,
@@ -105,46 +104,10 @@ const transcriptContextVersionQuery = createSqliteQueryCache((database) => {
   );
 });
 
-// Only the current transaction's last transcript is retained. Native writes and
-// rollback retire its revision; committed facts never become a turn-long cache.
-const contextFacts = new WeakMap<
-  DatabaseSync,
-  {
-    sessionId: string;
-    revision: SqliteReadScopeRevision;
-    version: SessionTranscriptContextVersion;
-    cold?: boolean;
-  }
->();
-
-function readContextFacts(database: Pick<OpenClawAgentDatabase, "db">, sessionId: string) {
-  const revision = database.db.isTransaction ? getSqliteReadScopeRevision(database.db) : undefined;
-  const retained = contextFacts.get(database.db);
-  return revision && retained?.revision === revision && retained.sessionId === sessionId
-    ? retained
-    : undefined;
-}
-
-function retainContextFacts(
-  database: Pick<OpenClawAgentDatabase, "db">,
-  sessionId: string,
-  version: SessionTranscriptContextVersion,
-  revision: SqliteReadScopeRevision | undefined,
-  cold?: boolean,
-) {
-  if (
-    database.db.isTransaction &&
-    revision &&
-    getSqliteReadScopeRevision(database.db) === revision
-  ) {
-    contextFacts.set(database.db, { sessionId, revision, version: { ...version }, cold });
-  }
-}
-
 function readContextState(database: Pick<OpenClawAgentDatabase, "db">, sessionId: string) {
   const revision = getSqliteReadScopeRevision(database.db);
   const { cold, ...version } = transcriptContextVersionQuery(database.db)(sessionId)!;
-  retainContextFacts(database, sessionId, version, revision, Boolean(cold));
+  retainTranscriptContextFacts(database, sessionId, version, revision, Boolean(cold));
   return { version, cold: Boolean(cold) };
 }
 
@@ -157,7 +120,7 @@ export function readTranscriptContextVersionInTransaction(
     return { ...actor.hot.transcript.version };
   }
   return {
-    ...(readContextFacts(database, sessionId)?.version ??
+    ...(readTranscriptContextFacts(database, sessionId)?.version ??
       readContextState(database, sessionId).version),
   };
 }
@@ -174,7 +137,7 @@ export function readTranscriptContextStateInTransaction(
       version: { ...actor.hot.transcript.version },
     };
   }
-  const retained = readContextFacts(database, sessionId);
+  const retained = readTranscriptContextFacts(database, sessionId);
   const state = retained?.cold === undefined ? readContextState(database, sessionId) : retained;
   return {
     coldArchive: state.cold ? readSessionColdTranscript(database.db, sessionId) : undefined,
@@ -259,6 +222,7 @@ export function ensureTranscriptSessionRoot(
   options: {
     allowStoredAlias?: boolean;
     onPlaceholderInserted?: (placeholder: { sessionKey: string; sessionId: string }) => void;
+    deferExistingWindowTouch?: boolean;
   } = {},
 ): void {
   return withSqliteDatabaseWriteScope(
@@ -270,6 +234,9 @@ export function ensureTranscriptSessionRoot(
       if (actor?.window) {
         if (actor.window.session_key !== scope.sessionKey) {
           throw new Error("Session actor transcript window belongs to another logical owner");
+        }
+        if (options.deferExistingWindowTouch) {
+          return;
         }
       } else {
         let nodeExists = false;
@@ -364,6 +331,8 @@ export function ensureTranscriptSessionRoot(
                 session_key: scope.sessionKey,
                 current_session_id: scope.sessionId,
                 entry_json: "{}",
+                ...deriveSessionPredicateColumns("{}"),
+                session_started_at: null,
                 entry_valid: -1,
                 updated_at: updatedAt,
               })
@@ -483,7 +452,11 @@ export function advanceTranscriptMutationAtInTransaction(
   database: OpenClawAgentDatabase,
   sessionId: string,
   value: number,
-  options: { strictly?: boolean } = {},
+  options: {
+    strictly?: boolean;
+    windowUpdatedAt?: number;
+    lastMessagePreview?: string | null;
+  } = {},
 ): void {
   return withSqliteDatabaseWriteScope(database.db, [sqliteSessionIdWriteScope(sessionId)], () => {
     let transcriptUpdatedAt = Math.floor(value);
@@ -509,6 +482,7 @@ export function advanceTranscriptMutationAtInTransaction(
     const update = db
       .updateTable("session_windows")
       .set((eb) => ({
+        ...(options.windowUpdatedAt !== undefined ? { updated_at: options.windowUpdatedAt } : {}),
         transcript_updated_at:
           options.strictly && !actor?.window
             ? eb.fn<number>("max", [
@@ -525,6 +499,9 @@ export function advanceTranscriptMutationAtInTransaction(
     }
     if (actor?.window) {
       executeSqliteQuerySync(database.db, update);
+      if (options.windowUpdatedAt !== undefined) {
+        actor.window.updated_at = options.windowUpdatedAt;
+      }
       actor.window.transcript_updated_at = transcriptUpdatedAt;
       actor.hot.transcript.version.updatedAt = transcriptUpdatedAt;
       const projection = actor.transcript.projection;
@@ -536,6 +513,9 @@ export function advanceTranscriptMutationAtInTransaction(
         indexedSeq: projection?.indexedSeq ?? null,
         activeMessageCount: projection?.activeMessageCount ?? null,
         needsRebuild: projection ? (projection.needsRebuild ? 1 : 0) : null,
+        ...(options.lastMessagePreview !== undefined
+          ? { lastMessagePreview: options.lastMessagePreview }
+          : {}),
       });
       return;
     }
@@ -587,7 +567,7 @@ export function advanceTranscriptMutationAtInTransaction(
         .$assertType<SessionTranscriptAuthority>(),
     );
     if (context) {
-      retainContextFacts(
+      retainTranscriptContextFacts(
         database,
         sessionId,
         {
@@ -597,7 +577,12 @@ export function advanceTranscriptMutationAtInTransaction(
         },
         getSqliteReadScopeRevision(database.db),
       );
-      publishSessionTranscriptAuthority(database, context);
+      publishSessionTranscriptAuthority(database, {
+        ...context,
+        ...(options.lastMessagePreview !== undefined
+          ? { lastMessagePreview: options.lastMessagePreview }
+          : {}),
+      });
     }
   });
 }
@@ -605,8 +590,14 @@ export function advanceTranscriptMutationAtInTransaction(
 export function touchTranscriptMutationInTransaction(
   database: OpenClawAgentDatabase,
   sessionId: string,
+  windowUpdatedAt?: number,
+  lastMessagePreview?: string | null,
 ): void {
-  advanceTranscriptMutationAtInTransaction(database, sessionId, Date.now(), { strictly: true });
+  advanceTranscriptMutationAtInTransaction(database, sessionId, Date.now(), {
+    strictly: true,
+    windowUpdatedAt,
+    lastMessagePreview,
+  });
 }
 
 export function deleteTranscriptEventsInTransaction(
