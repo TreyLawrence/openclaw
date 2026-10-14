@@ -264,6 +264,10 @@ describe("tool input progress real runtime proof", () => {
                   toolEvents.push({ data: payload.data, serialized: JSON.stringify(payload) });
                 }
               },
+            }).catch((error: unknown) => {
+              // A failed startup may leave its own cleanup unverified; retain state.
+              shutdownFailed = true;
+              throw error;
             });
             await runQaGatewayFixture(
               async () => {
