@@ -193,34 +193,34 @@ describe("embedded run session lane", () => {
       });
       // Load placement facts before the queue-heartbeat budget starts.
       await controller.enqueueGlobal(async () => ({ meta: { durationMs: 0 } }));
-      const run = controller.enqueueSession(
-        async () => {
-          const firstGlobalAdmission = controller.enqueueGlobal(async () => ({
-            meta: { durationMs: 1 },
-          }));
-          const interveningGlobalTask = enqueueCommandInLane(
-            globalLane,
-            async () => {
-              interveningGlobalTaskStarted.resolve();
-              await interveningGlobalGate.promise;
-            },
-            { priority: "foreground" },
-          );
-          const secondGlobalAdmission = controller.enqueueGlobal(async () => ({
-            meta: { durationMs: 2 },
-          }));
-          return await Promise.all([
-            firstGlobalAdmission,
-            interveningGlobalTask,
-            secondGlobalAdmission,
-          ]);
-        },
-        { taskTimeoutMs: 25 },
-      );
-
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
       try {
+        const run = controller.enqueueSession(
+          async () => {
+            const firstGlobalAdmission = controller.enqueueGlobal(async () => ({
+              meta: { durationMs: 1 },
+            }));
+            const interveningGlobalTask = enqueueCommandInLane(
+              globalLane,
+              async () => {
+                interveningGlobalTaskStarted.resolve();
+                await interveningGlobalGate.promise;
+              },
+              { priority: "foreground" },
+            );
+            const secondGlobalAdmission = controller.enqueueGlobal(async () => ({
+              meta: { durationMs: 2 },
+            }));
+            return await Promise.all([
+              firstGlobalAdmission,
+              interveningGlobalTask,
+              secondGlobalAdmission,
+            ]);
+          },
+          { taskTimeoutMs: 25 },
+        );
         await interveningGlobalTaskStarted.promise;
-        await delay(75);
+        await vi.advanceTimersByTimeAsync(75);
         await expectLaneCounts(sessionLane, 1, 0);
         await expectLaneCounts(globalLane, 1, 1);
 
@@ -233,6 +233,7 @@ describe("embedded run session lane", () => {
         await expectLaneCounts(sessionLane, 0, 0);
       } finally {
         interveningGlobalGate.resolve();
+        vi.useRealTimers();
       }
     });
   });
