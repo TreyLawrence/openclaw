@@ -65,6 +65,7 @@ const noops = {
     id: "",
     sessionKey: injection.sessionKey,
   }),
+  steerActiveRun: async () => ({ steered: false, reason: "not wired" }),
   registerTrustedToolPolicy: () => {},
   registerToolMetadata: () => {},
   registerControlUiDescriptor: () => {},

@@ -43,7 +43,8 @@ class PendingSessionCreate extends OpenClawLightDomElement {
       () => this.context?.chatSubmissions.readCreateComposer(this.sessionKey),
       (composer, notify) => composer.subscribe(notify),
     )
-    .watchStore(() => this.context?.placementStartup);
+    .watchStore(() => this.context?.placementStartup)
+    .watchStore(() => this.context?.theme);
   private readonly closeImage = () => {
     this.image?.release?.();
     this.image = null;
