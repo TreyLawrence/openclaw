@@ -42,7 +42,8 @@ describe("updateLiveEditDiffProgress", () => {
     expect(readPartialJson).toHaveBeenCalledTimes(2);
     updateLiveEditDiffProgressFromInput(state, { ...input, partialJsonLength: 1024 * 1024 + 1 });
     expect(readPartialJson).toHaveBeenCalledTimes(2);
-    expect(state.size).toBe(0);
+    // Past the parse cap the call stays tracked so its input length keeps reporting.
+    expect(state.size).toBe(1);
     for (let index = 0; index < 64; index++) {
       updateLiveEditDiffProgressFromInput(state, { ...input, toolCallId: `call-${index}` });
     }
