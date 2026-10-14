@@ -2,8 +2,9 @@
  * Real runtime proof for PR #168270: a loopback Anthropic-format provider streams a large argument
  * for a non-edit tool in several deltas. The embedded runner must emit counts-only
  * `tool` / `input_delta` progress for that call while its input streams, before the
- * tool starts, and must never put argument content in those events. Throttle windows
- * are covered with fake timers in embedded-agent-live-edit-diff.test.ts.
+ * tool starts, and must never put argument content in those events. An observer that
+ * reconnects mid-stream must read the same counts from the chat.history in-flight snapshot.
+ * Throttle windows are covered with fake timers in embedded-agent-live-edit-diff.test.ts.
  */
 import fs from "node:fs/promises";
 import { createServer, type ServerResponse } from "node:http";
@@ -15,6 +16,7 @@ import { clearConfigCache, clearRuntimeConfigSnapshot } from "../src/config/conf
 import { clearSessionStoreCacheForTest } from "../src/config/sessions/store-writer-state.js";
 import type { ModelDefinitionConfig, ModelProviderConfig } from "../src/config/types.models.js";
 import {
+  connectGatewayClient,
   disconnectGatewayClient,
   startGatewayWithClient,
 } from "../src/gateway/test-helpers.e2e.js";
@@ -44,6 +46,7 @@ const TOKEN = "tool-input-progress-proof-token";
 const TOOL_CALL_ID = "call_large_read";
 const ARGUMENT_MARKER = "ARGUMENT_CONTENT_MUST_NOT_LEAK";
 const DONE_MARKER = "TOOL_INPUT_PROGRESS_DONE";
+const SESSION_KEY = "agent:main:tool-input-progress-proof";
 const CHUNK_COUNT = 8;
 
 function sse(event: Record<string, unknown>): string {
@@ -75,8 +78,15 @@ function largeArgumentChunks(): string[] {
   );
 }
 
-/** First turn: stream one `read` tool call's input in several deltas, like a long generation. */
-function streamLargeToolCallTurn(response: ServerResponse): void {
+/**
+ * First turn: stream one `read` tool call's input in several deltas, like a long generation.
+ * The stream holds at its midpoint until the test releases it, so an observer can reconnect
+ * while the input is still streaming.
+ */
+async function streamLargeToolCallTurn(
+  response: ServerResponse,
+  midpoint: Promise<void>,
+): Promise<void> {
   response.write(sse(messageStart("msg_tool_input_progress_tool")));
   response.write(
     sse({
@@ -85,7 +95,10 @@ function streamLargeToolCallTurn(response: ServerResponse): void {
       content_block: { type: "tool_use", id: TOOL_CALL_ID, name: "read", input: {} },
     }),
   );
-  for (const chunk of largeArgumentChunks()) {
+  for (const [index, chunk] of largeArgumentChunks().entries()) {
+    if (index === CHUNK_COUNT / 2) {
+      await midpoint;
+    }
     response.write(
       sse({
         type: "content_block_delta",
@@ -152,6 +165,13 @@ describe("tool input progress real runtime proof", () => {
       const envSnapshot = captureEnv([...envKeys]);
       const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-tool-input-progress-"));
       let providerRequests = 0;
+      let releaseStream!: () => void;
+      const midpoint = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      let liveCharsAtReconnect: number | undefined;
+      let replayed: ToolEventData[] = [];
+      let replayedSerialized = "";
       const toolEvents: Array<{ data: ToolEventData; serialized: string }> = [];
       const providerServer = createServer((request, response) => {
         request.resume();
@@ -162,7 +182,7 @@ describe("tool input progress real runtime proof", () => {
             "cache-control": "no-cache",
           });
           if (providerRequests === 1) {
-            streamLargeToolCallTurn(response);
+            void streamLargeToolCallTurn(response, midpoint);
           } else {
             response.end(finalTextTurn());
           }
@@ -250,13 +270,47 @@ describe("tool input progress real runtime proof", () => {
                 const started = await gateway.client.request<{ runId?: string; status?: string }>(
                   "chat.send",
                   {
-                    sessionKey: "agent:main:tool-input-progress-proof",
+                    sessionKey: SESSION_KEY,
                     message: "read the long notes file",
                     deliver: false,
                     idempotencyKey: "tool-input-progress-proof-turn",
                   },
                 );
                 expect(started.status).toBe("started");
+                const liveProgress = () =>
+                  toolEvents.filter(
+                    (event) =>
+                      event.data.toolCallId === TOOL_CALL_ID && event.data.phase === "input_delta",
+                  );
+                await expect
+                  .poll(() => liveProgress().length, { timeout: 30_000 })
+                  .toBeGreaterThan(0);
+                // The stream is held mid-argument: a fresh observer reconnects and reads the
+                // in-flight snapshot that chat.history replays.
+                const observer = await connectGatewayClient({
+                  url: `ws://127.0.0.1:${gateway.port}`,
+                  token: TOKEN,
+                  clientDisplayName: "tool-input-progress-observer",
+                });
+                await runQaGatewayFixture(
+                  async () => {
+                    const history = await observer.request<{
+                      inFlightRun?: { events?: Array<{ stream?: string; data?: ToolEventData }> };
+                    }>("chat.history", { sessionKey: SESSION_KEY });
+                    liveCharsAtReconnect = liveProgress().at(-1)?.data.inputChars;
+                    replayedSerialized = JSON.stringify(history.inFlightRun ?? null);
+                    replayed = (history.inFlightRun?.events ?? [])
+                      .filter(
+                        (event) =>
+                          event.stream === "tool" &&
+                          event.data?.toolCallId === TOOL_CALL_ID &&
+                          event.data.phase === "input_delta",
+                      )
+                      .map((event) => event.data ?? {});
+                  },
+                  shutdownPhase(() => disconnectGatewayClient(observer)),
+                );
+                releaseStream();
                 const waited = await gateway.client.request<{ status?: string }>(
                   "agent.wait",
                   { runId: started.runId, timeoutMs: 30_000 },
@@ -265,6 +319,7 @@ describe("tool input progress real runtime proof", () => {
                 expect(waited).toMatchObject({ status: "ok" });
                 expect(providerRequests).toBe(2);
               },
+              async () => releaseStream(),
               shutdownPhase(() => disconnectGatewayClient(gateway.client)),
               shutdownPhase(() => gateway.server.close()),
             );
@@ -305,6 +360,11 @@ describe("tool input progress real runtime proof", () => {
         expect(event.data).not.toHaveProperty("diff");
         expect(event.serialized).not.toContain(ARGUMENT_MARKER);
       }
+      // Reconnect replay carries the same counts the live observer had seen, and no content.
+      expect(liveCharsAtReconnect).toBeGreaterThan(0);
+      expect(replayed.at(-1)).toMatchObject({ name: "read", inputChars: liveCharsAtReconnect });
+      expect(replayed.at(-1)).not.toHaveProperty("diff");
+      expect(replayedSerialized).not.toContain(ARGUMENT_MARKER);
     },
   );
 });
