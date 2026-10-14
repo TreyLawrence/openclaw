@@ -38,18 +38,22 @@ import { createSessionCapability, type SessionCapability } from "../../lib/sessi
 import { createSessionArchiveState } from "../../lib/sessions/session-archive-state.ts";
 import { createSessionRowProvenance } from "../../lib/sessions/session-row-provenance.ts";
 import { ControlUiPluginRuntime } from "../../plugins/control-ui-runtime.ts";
+import { createNavigationPreferencesFixture } from "../../test-helpers/application-context.ts";
 import {
   createTestGatewayClient,
   type GatewayRequestHandler,
 } from "../../test-helpers/gateway-client.ts";
-import "./chat-pane.ts";
 import {
   gatewayHelloForMethods,
   SESSION_MUTATION_TEST_METHODS,
   sessionMutationGatewayHello,
 } from "../../test-helpers/gateway-methods.ts";
 import type { createChatPaneRails } from "./chat-pane-rails.ts";
-import { ChatPane } from "./chat-pane-render.ts";
+import { ChatPaneRuntime } from "./chat-pane-render.ts";
+import {
+  createPaneTestHost as createRuntimeTestHost,
+  type PaneRuntimeConstructor,
+} from "./chat-pane-runtime.test-support.ts";
 import { attachChatRealtimeActions, createInitialChatRealtimeState } from "./chat-realtime.ts";
 import type { ChatStateController } from "./chat-state-controller.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
@@ -59,7 +63,7 @@ import type {
   ChatTypingActorView,
   ChatTypingOverflow,
 } from "./chat-typing-presence.ts";
-import type { ChatProps } from "./chat-view.ts";
+import type { ChatProps } from "./chat-view.tsx";
 import type { HeaderMenuAction } from "./components/chat-header-session-menu.ts";
 import { createSessionWorkspaceProps } from "./components/chat-session-workspace.ts";
 import type { SidebarPanelDefinition } from "./components/chat-sidebar-region-types.ts";
@@ -67,6 +71,7 @@ import type {
   ChatTaskSuggestionTrayProps,
   TaskSuggestionStartMode,
 } from "./components/chat-task-suggestions.ts";
+import type { ChatTranscriptController } from "./components/chat-transcript-controller.ts";
 import type { ChatMessageCache } from "./session-message-cache.ts";
 import type { SessionSnapshotStore } from "./session-snapshot-store.ts";
 import type { SidebarLayout } from "./sidebar-layout.ts";
@@ -87,6 +92,9 @@ export function createPaneHeaderWorkspaceFixture(
 }
 
 export interface TestChatPane extends HTMLElement, ReactiveControllerHost {
+  readonly element: HTMLElement;
+  render: ChatPaneRuntime["render"];
+  readonly transcript: ChatTranscriptController;
   catalogMessages: unknown[];
   active: boolean;
   presented: boolean;
@@ -95,7 +103,7 @@ export interface TestChatPane extends HTMLElement, ReactiveControllerHost {
   sessionSnapshotStore?: SessionSnapshotStore;
   chatState: Pick<
     ChatStateController<ChatPageHost>,
-    "attach" | "composerPersistence" | "createRenderLifecycle"
+    "attach" | "composerPersistence" | "createRenderLifecycle" | "requestBackgroundUpdate"
   >;
   context: ApplicationContext;
   state: ChatPageHost;
@@ -160,7 +168,7 @@ export interface TestChatPane extends HTMLElement, ReactiveControllerHost {
   typingOverflow?: ChatTypingOverflow;
   clearTypingActors: () => void;
   typingActorViews: () => ChatTypingActorView[];
-  sendTypingState: (typing: boolean, preview?: string) => void;
+  sendTypingState: (typing: boolean, preview?: string, cursor?: number) => void;
   refreshSessionSuggestions: () => Promise<void>;
   resolveCurrentSessionSuggestion: (
     suggestion: SessionSuggestion,
@@ -295,6 +303,7 @@ function withLiveCapabilities(
     ...context,
     chatAttachmentHandoff,
     connectionBootstrap,
+    navigation: createNavigationPreferencesFixture(),
     theme,
     agents,
     sessions,
@@ -329,6 +338,7 @@ export function createInitializationContext(client?: GatewayBrowserClient): Appl
       },
     },
     config: {
+      subscribe: () => () => {},
       current: {
         assistantIdentity: {
           agentId: null,
@@ -350,6 +360,7 @@ export function createInitializationContext(client?: GatewayBrowserClient): Appl
     },
     runtimeConfig: {
       state: { configNeedsApply: false, configSnapshot: null },
+      ensureLoaded: async () => undefined,
       subscribe: () => () => {},
     },
     placementStartup: {
@@ -388,6 +399,7 @@ export function createSessionCapabilityFixture(
   return {
     captureConnectionScope: () => null,
     isConnectionScopeCurrent: () => false,
+    subscribe: () => () => undefined,
     deletionState: () => undefined,
     think: () => undefined,
     settingsPreview: () => undefined,
@@ -464,6 +476,7 @@ export function createSessionContext(
       },
     },
     config: {
+      subscribe: () => () => {},
       current: {
         assistantIdentity: { name: "Molty" },
         terminalEnabled: false,
@@ -486,12 +499,25 @@ export function createSessionContext(
   });
 }
 
+export function createPaneTestHost<R extends ChatPaneRuntime>(
+  tag: string,
+  Runtime: PaneRuntimeConstructor<R>,
+) {
+  return createRuntimeTestHost(tag, Runtime, createInitializationContext);
+}
+
+export { getPaneTestRuntime, connectPaneTestView } from "./chat-pane-runtime.test-support.ts";
+
 export function createTestChatPane(params: {
   client: GatewayBrowserClient;
   sessions?: SessionCapability;
 }) {
   const context = createSessionContext(params.client, params.sessions);
-  const pane = document.createElement("openclaw-chat-pane") as unknown as TestChatPane;
+  // SAFETY: TestChatPane declares the protected controller surface forwarded by the test host.
+  const pane = createPaneTestHost(
+    "openclaw-chat-runtime-test",
+    ChatPaneRuntime,
+  ) as unknown as TestChatPane;
   Object.defineProperty(pane, "isConnected", {
     configurable: true,
     value: true,
@@ -626,11 +652,12 @@ export function offlineDeviceSession(): GatewaySessionRow & { placement: ActiveP
   };
 }
 
-class RenderTestChatPane extends ChatPane {
+class RenderTestChatPane extends ChatPaneRuntime {
+  declare context: ApplicationContext;
   chatProps: ChatProps | undefined;
 
-  constructor() {
-    super();
+  constructor(element: HTMLElement, context: ApplicationContext) {
+    super(element, context);
     onTestFinished(() => disposeQuestionPromptState(this.questionPromptState));
   }
 
@@ -663,8 +690,5 @@ class RenderTestChatPane extends ChatPane {
 }
 
 export function createRenderTestChatPane() {
-  if (!customElements.get("openclaw-chat-render-regression")) {
-    customElements.define("openclaw-chat-render-regression", RenderTestChatPane);
-  }
-  return document.createElement("openclaw-chat-render-regression") as RenderTestChatPane;
+  return createPaneTestHost("openclaw-chat-render-regression", RenderTestChatPane);
 }

@@ -5,6 +5,7 @@ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coe
 import { normalizeChatType, type ChatType } from "../channels/chat-type.js";
 import { parseSqliteSessionEntryRecord } from "../config/sessions/session-entry-json.js";
 import type { SessionEntry } from "../config/sessions/types.js";
+import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import { SqliteSchemaMismatchError } from "../infra/sqlite-schema-issues.js";
 import { normalizeAccountId } from "../routing/account-id.js";
 import { buildConversationRef, normalizeConversationPeerId } from "../routing/conversation-ref.js";
@@ -353,8 +354,15 @@ export function ensureSessionAdditiveColumns(db: DatabaseSync): void {
   // reconcile owner fills it without parsing payloads during schema open.
   ensureColumn(db, "session_transcript_active_events", "context_eligible INTEGER");
   ensureColumn(db, "session_nodes", "project_id TEXT");
+  ensureColumn(db, "session_windows", "row_transcript_json TEXT");
+  ensureColumn(db, "session_windows", "row_transcript_updated_at INTEGER");
   ensureColumn(db, "session_conversations", "route_context_json TEXT");
-  if (tableExists(db, "session_conversations")) {
+  if (
+    tableExists(db, "session_conversations") &&
+    !getAdmittedSqliteSchemaFacts(db)?.triggers.has(
+      "session_conversations_route_context_invalidate_after_update",
+    )
+  ) {
     // Same-version older writers leave the envelope byte-identical. Clear it on their update so
     // stale owner facts cannot survive a downgrade/re-upgrade cycle with an unchanged timestamp.
     db.exec(`
@@ -380,6 +388,13 @@ export function hasPendingSessionConversationRouteContextColumn(db: DatabaseSync
 export function hasPendingSessionProjectColumn(db: DatabaseSync): boolean {
   const columns = readSqliteTableColumns(db, "session_nodes");
   return Boolean(columns && !columns.has("project_id"));
+}
+
+export function hasPendingSessionRowTranscriptColumns(db: DatabaseSync): boolean {
+  const columns = readSqliteTableColumns(db, "session_windows");
+  return Boolean(
+    columns && (!columns.has("row_transcript_json") || !columns.has("row_transcript_updated_at")),
+  );
 }
 
 export function hasPendingSessionTranscriptContextEligibilityColumn(db: DatabaseSync): boolean {

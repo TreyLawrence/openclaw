@@ -4,17 +4,18 @@ import {
   assertStateDatabaseAccessAllowed,
   assertStateDatabaseReadAllowed,
 } from "../infra/gateway-state-owner.js";
-import {
-  clearNodeSqliteKyselyCacheForDatabase,
-  registerNodeSqliteKyselyQueryErrorHandler,
-} from "../infra/kysely-sync-cache-state.js";
+import { registerNodeSqliteKyselyQueryErrorHandler } from "../infra/kysely-sync-cache-state.js";
 import { openNodeSqliteDatabase, resolveExistingSqliteFileUri } from "../infra/node-sqlite.js";
 import {
   isSqliteCorruptionError,
   isSqliteLockError,
   sqlitePrimaryResultCode,
 } from "../infra/sqlite-error-diagnostics.js";
-import type { SqliteFileGeneration } from "../infra/sqlite-file-generation.js";
+import { readSqliteFileGeneration } from "../infra/sqlite-file-generation-worker.js";
+import {
+  sameSqliteFileGeneration,
+  type SqliteFileGeneration,
+} from "../infra/sqlite-file-generation.js";
 import {
   confirmSqliteFileIntegrity,
   type SqliteIntegrityConfirmation,
@@ -24,7 +25,6 @@ import {
   throwSqliteLifecycleErrors,
 } from "../infra/sqlite-lifecycle-errors.js";
 import { createSqliteTerminalOpenLatch } from "../infra/sqlite-terminal-open-latch.js";
-import { cancelSqliteWalWriteAdmission } from "../infra/sqlite-wal-write-admission.js";
 import { registerSqliteCacheExitClose } from "../infra/sqlite-wal.js";
 import type { DatabasePathIdentity } from "../infra/sqlite-worker-identity.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
@@ -36,7 +36,6 @@ import {
   isOpenClawDatabaseMaintenanceResourceOwned,
   observeOpenClawDatabaseMaintenanceResource,
   type OpenClawDatabaseMaintenanceScope,
-  type OpenClawStateDatabaseAsyncResource,
   type OpenClawStateDatabaseReadAdmission,
 } from "./openclaw-state-db-async-lifecycle.js";
 import {
@@ -58,7 +57,7 @@ import type {
   StateDatabaseHandle,
 } from "./openclaw-state-db-contract.js";
 import {
-  closeTrackedStateDatabase,
+  closeStateDatabaseHandle,
   readTrackedStateDatabaseIdentity,
 } from "./openclaw-state-db-handle.js";
 import { invalidateOpenClawStateRuntimeIntegrity } from "./openclaw-state-db-integrity-admission.js";
@@ -84,6 +83,7 @@ const stateDatabaseLifecycle = resolveGlobalSingleton<StateDatabaseLifecycle>(
     asyncResources: createOpenClawStateDatabaseAsyncLifecycle(),
   }),
   () => closeOpenClawStateDatabaseAsync(),
+  "shared-state",
 );
 const {
   cachedDatabases,
@@ -257,33 +257,8 @@ function closeOpenClawStateDatabaseHandle(
     return [error];
   }
   idleReferences.delete(database.db);
-  const errors: unknown[] = [];
   openClawStateSnapshotOwners.release(database.db);
-  try {
-    void cancelSqliteWalWriteAdmission(database.db);
-    database.walMaintenance?.close(options);
-  } catch (error) {
-    errors.push(error);
-  }
-  try {
-    clearNodeSqliteKyselyCacheForDatabase(database.db);
-  } catch (error) {
-    errors.push(error);
-  }
-  try {
-    closeTrackedStateDatabase(database.db);
-  } catch (error) {
-    errors.push(error);
-  }
-  let cleanupPending = false;
-  if (!database.db.isOpen) {
-    try {
-      database.afterClose?.();
-    } catch (error) {
-      errors.push(error);
-      cleanupPending = true;
-    }
-  }
+  const { errors, cleanupPending } = closeStateDatabaseHandle(database, options);
   if (database.db.isOpen || cleanupPending) {
     retainStateDatabaseClose(database);
   } else {
@@ -430,14 +405,13 @@ export async function getOpenClawStateDatabaseTerminalFailureAsync(
   context.admission.assertCurrent();
   const failure = await terminalOpenLatch.getAsync(
     context.admission.databasePath,
-    async (_path, generation) => {
-      const { inspectOpenClawStateDatabaseGeneration } =
-        await import("./openclaw-state-worker-store.js");
-      const matches = await inspectOpenClawStateDatabaseGeneration(context, generation, signal);
-      if (matches === undefined) {
-        throw new Error("Recorded shared-state database generation is unavailable");
-      }
-      return matches;
+    async (pathname, generation) => {
+      signal?.throwIfAborted();
+      context.admission.assertCurrent();
+      const current = await readSqliteFileGeneration(pathname, signal);
+      signal?.throwIfAborted();
+      context.admission.assertCurrent();
+      return sameSqliteFileGeneration(generation, current);
     },
   );
   context.admission.assertCurrent();
@@ -447,11 +421,9 @@ export async function getOpenClawStateDatabaseTerminalFailureAsync(
 /** Reject shared-state access after a process-local terminal failure. */
 function assertOpenClawStateDatabaseOpenAllowed(pathname: string, ownership?: "cached-read"): void {
   const resolvedPath = resolveDatabasePath({ path: pathname });
-  if (ownership === "cached-read") {
-    assertStateDatabaseReadAllowed(pathname);
-  } else {
-    assertStateDatabaseAccessAllowed(pathname);
-  }
+  const assertAllowed =
+    ownership === "cached-read" ? assertStateDatabaseReadAllowed : assertStateDatabaseAccessAllowed;
+  assertAllowed(pathname);
   const { identity } = asyncResources.capture(resolvedPath);
   const terminalFailure = terminalOpenLatch.get(resolvedPath);
   if (terminalFailure) {
@@ -585,11 +557,7 @@ export function closeOpenClawStateDatabase(options?: OpenClawStateDatabaseCloseO
 }
 
 /** Register a resource owner before it can admit any shared-state worker opens. */
-export function registerOpenClawStateDatabaseAsyncResource(
-  resource: OpenClawStateDatabaseAsyncResource,
-): () => void {
-  return asyncResources.register(resource);
-}
+export const registerOpenClawStateDatabaseAsyncResource = asyncResources.register;
 
 /** Capture the canonical read generation before any asynchronous worker admission. */
 export const captureOpenClawStateDatabaseReadAdmission = asyncResources.capture;
@@ -657,6 +625,9 @@ export const openClawStateDatabaseCache = {
   evictCachedOpenClawStateDatabase,
   evictOpenClawStateDatabaseAfterCorruption,
   getCachedOpenClawStateDatabase,
+  // Identity only: re-enter retained transaction custody before ordinary access admission.
+  peekOpenClawStateDatabaseConnection: (pathname: string): DatabaseSync | undefined =>
+    cachedDatabases.get(resolveDatabasePath({ path: pathname }))?.db,
   withCachedOpenClawStateDatabase,
   getOpenClawStateDatabaseRecordedFailure: terminalOpenLatch.peek,
   getOpenClawStateDatabaseIfOpenAtPath,

@@ -1,10 +1,16 @@
 import { SYSTEM_PROMPT_CACHE_BOUNDARY } from "@openclaw/ai/internal/shared";
-import { describe, expect, it } from "vitest";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { assert, describe, expect, it } from "vitest";
 import type { OpenAICompletionsOptions } from "../provider-options.js";
+import { publishRuntimeToolInputSchema } from "../providers/tool-schema-json-projection.js";
 import { FAILED_ASSISTANT_REPLAY_TEXT } from "../replay-turn-classification.js";
 import type { Context, Model, Tool } from "../types.js";
 import { createZeroUsage } from "../usage.test-support.js";
-import { buildOpenAICompletionsParams } from "./openai-completions-params.js";
+import { resolveOpenAICompletionsCompat } from "./openai-completions-compat.js";
+import {
+  buildOpenAICompletionsParams,
+  buildOpenAICompletionsRequest,
+} from "./openai-completions-params.js";
 import { makeCompletionsModel } from "./openai-completions.test-support.js";
 import { buildOpenAIResponsesParams } from "./openai-responses-params-internal.js";
 import type { OpenAIModeModel } from "./openai-transport-shared.js";
@@ -176,6 +182,44 @@ describe("OpenAI completions output budgets", () => {
 });
 
 describe("OpenAI completions reasoning", () => {
+  it.each(["direct", "managed"] as const)(
+    "sends custom reasoning controls with conservative off defaults (%s)",
+    (mode) => {
+      const cases: [
+        Partial<CompletionsModel>,
+        OpenAICompletionsOptions["reasoningEffort"],
+        string | undefined,
+      ][] = [
+        [{}, "low", "low"],
+        [{}, "high", "high"],
+        [{}, "off", undefined],
+        [{ compat: { supportsReasoningEffort: true } }, "off", undefined],
+        [{ id: "gpt-5.4" }, "off", undefined],
+        [{ reasoning: false }, "high", undefined],
+        [{ compat: { supportsReasoningEffort: false } }, "high", undefined],
+        [{ compat: { reasoningEffortMap: { off: "none" } } }, "off", "none"],
+        [{ compat: { supportedReasoningEfforts: ["none", "low", "high"] } }, "off", "none"],
+        [{ thinkingLevelMap: { off: "low" } }, "off", "low"],
+        [{ compat: { supportedReasoningEfforts: ["low", "high"] } }, "max", "high"],
+        [{ compat: { supportedReasoningEfforts: ["low", "high", "max"] } }, "max", "max"],
+      ];
+      for (const baseUrl of ["http://localhost:8000/v1", "https://proxy.example.com/v1"]) {
+        for (const [overrides, reasoningEffort, expected] of cases) {
+          const model = makeCompletionsModel({ provider: "custom", baseUrl, ...overrides });
+          const params = buildOpenAICompletionsRequest(
+            model,
+            emptyContext(),
+            { reasoningEffort },
+            mode === "direct"
+              ? { mode, compat: resolveOpenAICompletionsCompat(model), cacheRetention: "none" }
+              : { mode },
+          );
+          expect(params.reasoning_effort, `${baseUrl} ${reasoningEffort}`).toBe(expected);
+        }
+      }
+    },
+  );
+
   it("maps shared reasoning to supported provider-native efforts", () => {
     const groq = { provider: "groq", baseUrl: "https://api.groq.com/openai/v1" };
     const mapped = makeCompletionsModel({
@@ -565,6 +609,24 @@ function requestTools(
 }
 
 describe("OpenAI completions compatibility and tools", () => {
+  it("reuses published wire descriptors while applying current strict compatibility", () => {
+    const { schema: parameters } = publishRuntimeToolInputSchema({
+      type: "object",
+      properties: {},
+    });
+    assert(isRecord(parameters));
+    const context = toolContext(parameters);
+    const first = requestTools(toolsNative, context).tools?.[0];
+    expect(first).toMatchObject({ type: "function", function: { name: "lookup_weather" } });
+    expect(requestTools(toolsNative, context).tools?.[0]).toBe(first);
+    const withoutStrict = requestTools(
+      { ...toolsNative, compat: { supportsStrictMode: false } },
+      context,
+    ).tools?.[0];
+    expect(withoutStrict).not.toHaveProperty("function.strict");
+    expect(requestTools(toolsNative, context).tools?.[0]).toBe(first);
+  });
+
   it("keeps implicit tool choice limited to proxy endpoints", () => {
     const proxyParams = requestTools(
       { provider: "custom-cpa", baseUrl: "https://proxy.example.com/v1" },

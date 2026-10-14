@@ -16,7 +16,7 @@ export type LiveEditDiffProgressState = {
   lastCheckedAtMs: number;
 };
 
-type LiveEditDiffProgress = {
+export type LiveEditDiffProgress = {
   toolCallId: string;
   name: string;
   /** Length of the streamed argument JSON so far. Counts only, never content. */
@@ -84,8 +84,29 @@ export function updateLiveEditDiffProgress(
   const block = readToolCallBlock(event);
   const toolCallId = typeof block?.id === "string" ? block.id : "";
   const name = typeof block?.name === "string" ? block.name : "";
+  // partialJson is the producer's live buffer, not a per-event snapshot. A lagging reader sees a
+  // newer value (counts only move forward) or none after toolcall_end (skipped); accepted for progress.
   const partialJson = typeof block?.partialJson === "string" ? block.partialJson : "";
-  if (!toolCallId || !name || !partialJson) {
+  return updateLiveEditDiffProgressFromInput(stateByToolCallId, {
+    toolCallId,
+    name,
+    partialJsonLength: partialJson.length,
+    readPartialJson: () => partialJson,
+  });
+}
+
+/** Share bounded counting without assembling cumulative CLI arguments before admission. */
+export function updateLiveEditDiffProgressFromInput(
+  stateByToolCallId: Map<string, LiveEditDiffProgressState>,
+  input: {
+    toolCallId: string;
+    name: string;
+    partialJsonLength: number;
+    readPartialJson: () => string;
+  },
+): LiveEditDiffProgress | undefined {
+  const { toolCallId, name, partialJsonLength } = input;
+  if (!toolCallId || !name || !partialJsonLength) {
     return undefined;
   }
 
@@ -114,18 +135,21 @@ export function updateLiveEditDiffProgress(
   }
   progress.lastCheckedAtMs = now;
   const kind = resolveFileMutationToolName(name);
-  // Parsing is the expensive part: only file-mutation tools parse, after the
-  // throttle and under the size cap, so fragmented large arguments cannot create
-  // quadratic work on the event path. Past the cap the line counts stay frozen
-  // while the length keeps reporting progress.
-  if (kind && partialJson.length <= LIVE_EDIT_DIFF_MAX_PARTIAL_JSON_CHARS) {
-    const counted = countStreamingFileMutationLines(kind, parseStreamingJson(partialJson));
+  // Parsing is the expensive part: only file-mutation tools read and parse the
+  // cumulative input, after the throttle and under the size cap, so fragmented
+  // large arguments cannot create quadratic work on the event path. Past the cap
+  // the line counts stay frozen while the length keeps reporting progress.
+  if (kind && partialJsonLength <= LIVE_EDIT_DIFF_MAX_PARTIAL_JSON_CHARS) {
+    const counted = countStreamingFileMutationLines(
+      kind,
+      parseStreamingJson(input.readPartialJson()),
+    );
     // Streaming parses are best effort. Never move a visible counter backwards if
     // an incomplete JSON boundary temporarily exposes less of the same arguments.
     progress.added = Math.max(progress.added, counted.added);
     progress.removed = Math.max(progress.removed, counted.removed);
   }
-  const inputChars = Math.max(progress.emittedInputChars, partialJson.length);
+  const inputChars = Math.max(progress.emittedInputChars, partialJsonLength);
   if (
     inputChars === progress.emittedInputChars &&
     progress.added === progress.emittedAdded &&
