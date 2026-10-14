@@ -170,109 +170,123 @@ describe("tool input progress real runtime proof", () => {
       });
 
       // Every shutdown phase runs and its failure surfaces. Process-wide env and the
-      // temporary home are released only after shutdown succeeded.
-      await runQaGatewayFixture(
-        async () => {
-          const stateDir = path.join(tempHome, ".openclaw");
-          const workspaceDir = path.join(tempHome, "workspace");
-          const configPath = path.join(stateDir, "openclaw.json");
-          const bundledPluginsDir = path.join(tempHome, "bundled-plugins");
-          await Promise.all([
-            fs.mkdir(workspaceDir, { recursive: true }),
-            fs.mkdir(bundledPluginsDir, { recursive: true }),
-            fs.mkdir(path.dirname(configPath), { recursive: true }),
-          ]);
-          for (const [key, value] of Object.entries({
-            HOME: tempHome,
-            OPENCLAW_STATE_DIR: stateDir,
-            OPENCLAW_CONFIG_PATH: configPath,
-            OPENCLAW_GATEWAY_TOKEN: TOKEN,
-            OPENCLAW_SKIP_CHANNELS: "1",
-            OPENCLAW_SKIP_GMAIL_WATCHER: "1",
-            OPENCLAW_SKIP_CRON: "1",
-            OPENCLAW_SKIP_CANVAS_HOST: "1",
-            OPENCLAW_SKIP_BROWSER_CONTROL_SERVER: "1",
-            OPENCLAW_SKIP_PROVIDERS: "1",
-            OPENCLAW_BUNDLED_PLUGINS_DIR: bundledPluginsDir,
-            OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
-          })) {
-            setTestEnvValue(key, value);
-          }
+      // temporary home are released once shutdown succeeded, even when the body failed.
+      let shutdownFailed = false;
+      const shutdownPhase = (phase: () => Promise<void>) => async () => {
+        try {
+          await phase();
+        } catch (error) {
+          shutdownFailed = true;
+          throw error;
+        }
+      };
+      try {
+        await runQaGatewayFixture(
+          async () => {
+            const stateDir = path.join(tempHome, ".openclaw");
+            const workspaceDir = path.join(tempHome, "workspace");
+            const configPath = path.join(stateDir, "openclaw.json");
+            const bundledPluginsDir = path.join(tempHome, "bundled-plugins");
+            await Promise.all([
+              fs.mkdir(workspaceDir, { recursive: true }),
+              fs.mkdir(bundledPluginsDir, { recursive: true }),
+              fs.mkdir(path.dirname(configPath), { recursive: true }),
+            ]);
+            for (const [key, value] of Object.entries({
+              HOME: tempHome,
+              OPENCLAW_STATE_DIR: stateDir,
+              OPENCLAW_CONFIG_PATH: configPath,
+              OPENCLAW_GATEWAY_TOKEN: TOKEN,
+              OPENCLAW_SKIP_CHANNELS: "1",
+              OPENCLAW_SKIP_GMAIL_WATCHER: "1",
+              OPENCLAW_SKIP_CRON: "1",
+              OPENCLAW_SKIP_CANVAS_HOST: "1",
+              OPENCLAW_SKIP_BROWSER_CONTROL_SERVER: "1",
+              OPENCLAW_SKIP_PROVIDERS: "1",
+              OPENCLAW_BUNDLED_PLUGINS_DIR: bundledPluginsDir,
+              OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
+            })) {
+              setTestEnvValue(key, value);
+            }
 
-          await new Promise<void>((resolve, reject) => {
-            providerServer.once("error", reject);
-            providerServer.listen(0, "127.0.0.1", resolve);
-          });
-          const providerAddress = providerServer.address();
-          if (!providerAddress || typeof providerAddress === "string") {
-            throw new Error("proof provider did not bind a loopback port");
-          }
-          const provider = buildMockAnthropicProvider(`http://127.0.0.1:${providerAddress.port}`);
-          const cfg = {
-            agents: {
-              defaults: {
-                workspace: workspaceDir,
-                skipBootstrap: true,
-                model: { primary: provider.modelRef },
-              },
-              entries: { main: {} },
-            },
-            models: { mode: "replace", providers: { [provider.providerId]: provider.config } },
-            gateway: { auth: { mode: "token", token: TOKEN } },
-          };
-          const gateway = await startGatewayWithClient({
-            cfg,
-            configPath,
-            token: TOKEN,
-            clientDisplayName: "tool-input-progress-proof",
-            caps: [GATEWAY_CLIENT_CAPS.TOOL_EVENTS],
-            onEvent: (event) => {
-              const payload = event.payload as
-                | { stream?: string; data?: ToolEventData }
-                | undefined;
-              if (event.event === "agent" && payload?.stream === "tool" && payload.data) {
-                toolEvents.push({ data: payload.data, serialized: JSON.stringify(payload) });
-              }
-            },
-          });
-          await runQaGatewayFixture(
-            async () => {
-              const started = await gateway.client.request<{ runId?: string; status?: string }>(
-                "chat.send",
-                {
-                  sessionKey: "agent:main:tool-input-progress-proof",
-                  message: "read the long notes file",
-                  deliver: false,
-                  idempotencyKey: "tool-input-progress-proof-turn",
-                },
-              );
-              expect(started.status).toBe("started");
-              const waited = await gateway.client.request<{ status?: string }>(
-                "agent.wait",
-                { runId: started.runId, timeoutMs: 30_000 },
-                { timeoutMs: 35_000 },
-              );
-              expect(waited).toMatchObject({ status: "ok" });
-              expect(providerRequests).toBe(2);
-            },
-            () => disconnectGatewayClient(gateway.client),
-            () => gateway.server.close(),
-          );
-        },
-        async () => {
-          if (providerServer.listening) {
-            providerServer.closeAllConnections();
             await new Promise<void>((resolve, reject) => {
-              providerServer.close((error) => (error ? reject(error) : resolve()));
+              providerServer.once("error", reject);
+              providerServer.listen(0, "127.0.0.1", resolve);
             });
-          }
-        },
-      );
-      envSnapshot.restore();
-      clearRuntimeConfigSnapshot();
-      clearConfigCache();
-      clearSessionStoreCacheForTest();
-      await fs.rm(tempHome, { recursive: true, force: true });
+            const providerAddress = providerServer.address();
+            if (!providerAddress || typeof providerAddress === "string") {
+              throw new Error("proof provider did not bind a loopback port");
+            }
+            const provider = buildMockAnthropicProvider(`http://127.0.0.1:${providerAddress.port}`);
+            const cfg = {
+              agents: {
+                defaults: {
+                  workspace: workspaceDir,
+                  skipBootstrap: true,
+                  model: { primary: provider.modelRef },
+                },
+                entries: { main: {} },
+              },
+              models: { mode: "replace", providers: { [provider.providerId]: provider.config } },
+              gateway: { auth: { mode: "token", token: TOKEN } },
+            };
+            const gateway = await startGatewayWithClient({
+              cfg,
+              configPath,
+              token: TOKEN,
+              clientDisplayName: "tool-input-progress-proof",
+              caps: [GATEWAY_CLIENT_CAPS.TOOL_EVENTS],
+              onEvent: (event) => {
+                const payload = event.payload as
+                  | { stream?: string; data?: ToolEventData }
+                  | undefined;
+                if (event.event === "agent" && payload?.stream === "tool" && payload.data) {
+                  toolEvents.push({ data: payload.data, serialized: JSON.stringify(payload) });
+                }
+              },
+            });
+            await runQaGatewayFixture(
+              async () => {
+                const started = await gateway.client.request<{ runId?: string; status?: string }>(
+                  "chat.send",
+                  {
+                    sessionKey: "agent:main:tool-input-progress-proof",
+                    message: "read the long notes file",
+                    deliver: false,
+                    idempotencyKey: "tool-input-progress-proof-turn",
+                  },
+                );
+                expect(started.status).toBe("started");
+                const waited = await gateway.client.request<{ status?: string }>(
+                  "agent.wait",
+                  { runId: started.runId, timeoutMs: 30_000 },
+                  { timeoutMs: 35_000 },
+                );
+                expect(waited).toMatchObject({ status: "ok" });
+                expect(providerRequests).toBe(2);
+              },
+              shutdownPhase(() => disconnectGatewayClient(gateway.client)),
+              shutdownPhase(() => gateway.server.close()),
+            );
+          },
+          shutdownPhase(async () => {
+            if (providerServer.listening) {
+              providerServer.closeAllConnections();
+              await new Promise<void>((resolve, reject) => {
+                providerServer.close((error) => (error ? reject(error) : resolve()));
+              });
+            }
+          }),
+        );
+      } finally {
+        if (!shutdownFailed) {
+          envSnapshot.restore();
+          clearRuntimeConfigSnapshot();
+          clearConfigCache();
+          clearSessionStoreCacheForTest();
+          await fs.rm(tempHome, { recursive: true, force: true });
+        }
+      }
 
       const forCall = toolEvents.filter((event) => event.data.toolCallId === TOOL_CALL_ID);
       const progress = forCall.filter((event) => event.data.phase === "input_delta");
