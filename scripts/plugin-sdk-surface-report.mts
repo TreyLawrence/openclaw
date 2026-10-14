@@ -272,8 +272,9 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +1: approved async auth-snapshot publication with retained sync compatibility.
       // +1: approved lexical database-engine admission scope for workboard boot/migrations.
       // +1: async auth-provider preparation for Codex and voice model-session patches.
+      // +1: isHostNoticePayload for agent-to-agent reply filtering.
       // +2: #154043 adds runWithMcpRequestMetadata and the McpServerRequestContext type.
-      3761,
+      3762,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(
@@ -307,8 +308,9 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +1: approved async auth-snapshot publication with retained sync compatibility.
       // +1: the same lexical database-engine admission scope.
       // +1: the same prepareAuthProfileProvider operation on model-session-runtime.
+      // +1: the same host-notice classifier on reply-payload.
       // +1: #154043 adds runWithMcpRequestMetadata.
-      2195,
+      2196,
       env,
     ),
     publicDeprecatedExports: readPluginSdkSurfaceBudgetEnv(
