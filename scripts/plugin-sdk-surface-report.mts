@@ -271,8 +271,9 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +10: shared database-engine contracts and operations after the SQLite export cutover.
       // +1: approved async auth-snapshot publication with retained sync compatibility.
       // +1: approved lexical database-engine admission scope for workboard boot/migrations.
+      // +1: async auth-provider preparation for Codex and voice model-session patches.
       // +2: #154043 adds runWithMcpRequestMetadata and the McpServerRequestContext type.
-      3760,
+      3761,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(
@@ -305,8 +306,9 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +5: shared database-engine host and worker operations.
       // +1: approved async auth-snapshot publication with retained sync compatibility.
       // +1: the same lexical database-engine admission scope.
+      // +1: the same prepareAuthProfileProvider operation on model-session-runtime.
       // +1: #154043 adds runWithMcpRequestMetadata.
-      2194,
+      2195,
       env,
     ),
     publicDeprecatedExports: readPluginSdkSurfaceBudgetEnv(
