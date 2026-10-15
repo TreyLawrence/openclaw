@@ -953,6 +953,16 @@ const runSqliteSessionLifecycle =
   (changedScopeHasSqliteSessionLifecycleImpact ||
     selectedOwnerTest("test/scripts/sqlite-sessions-transcripts-flip-proof.built-cli.e2e.test.ts"));
 const postgresConformancePaths = [
+  "src/gateway/server*.ts",
+  "src/cli/gateway-cli/run.ts",
+  "src/commands/*preflight*.ts",
+  "src/state/*worker*.ts",
+  "src/state/openclaw-state-ownership.ts",
+  "src/state/openclaw-agent-db-registry-listing.ts",
+  "src/infra/sqlite-worker-*.ts",
+  "src/state/openclaw-state-db*",
+  "src/state/openclaw-state-feature-schema-ensure.ts",
+  "src/state/user-profiles-schema.ts",
   "src/snapshot/**",
   "src/infra/backup-*.ts",
   "src/infra/update-database-*.ts",
@@ -1033,6 +1043,7 @@ const rawNodeTestShards = runNodeFull
           // the complete compact inventory within its 77-row main-tier cap.
           compact: compactPlanMode !== undefined,
           compactMode: mainValidation ? "pull-request" : compactPlanMode,
+          mainValidation,
           compactNodeJobCap: nodeMatrixLimit - nodeWorkerE2eShards.length,
           runnerBackend: nodeRunnerBackend,
         }),
@@ -1717,16 +1728,23 @@ if (hybridHostedEligible) {
     hostedPlanner ||
     (workflowEventName === "pull_request" &&
       process.env.OPENCLAW_CI_HEAD_REPOSITORY !== process.env.OPENCLAW_CI_REPOSITORY);
+  const hostedHybridControls =
+    process.env.OPENCLAW_CI_RUNNER_BACKEND === "hybrid" &&
+    workflowEventName !== "workflow_dispatch" &&
+    (workflowEventName !== "pull_request" ||
+      process.env.OPENCLAW_CI_HEAD_REPOSITORY === process.env.OPENCLAW_CI_REPOSITORY);
   // Include control jobs, every emitted matrix row and native hosted jobs.
   // Narrow PRs reserve full lint/type templates; only hybrid moves critical controls.
   // The guard independently expands the workflow to catch inventory drift.
   // Qualification authenticates on hosted preflight before paid admission.
   hybridHostedBaseRows = Object.values({
-    preflight: count(ciQualification),
+    preflight: count(ciQualification || hostedHybridControls),
+    "ci-gate": count(hostedHybridControls),
     "check-plan": count(hostedPlanner && runCheckPlan),
     "pr-failure-report": count(
       workflowEventName === "pull_request" &&
-        process.env.OPENCLAW_CI_HEAD_REPOSITORY !== process.env.OPENCLAW_CI_REPOSITORY,
+        (hostedHybridControls ||
+          process.env.OPENCLAW_CI_HEAD_REPOSITORY !== process.env.OPENCLAW_CI_REPOSITORY),
     ),
     "control-ui-performance": count(manifest.run_control_ui_performance),
     "published-driver-update": count(manifest.run_published_driver_update),
@@ -1777,7 +1795,6 @@ if (hybridHostedEligible) {
   }).reduce((total, rows) => total + rows, 0);
   hybridHostedOffloadRows =
     1 +
-    count(manifest.run_ui_tests, 3) +
     count(
       manifest.run_ui_e2e && !compatibilityTarget,
       manifest.ui_e2e_matrix.include.filter((row) => row.task === "browser-extension").length,

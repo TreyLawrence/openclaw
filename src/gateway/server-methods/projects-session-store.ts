@@ -64,7 +64,29 @@ export function assertMemoryProjectStoresCurrent(
   }
 }
 
+const projectSessionStores = new WeakMap<
+  SessionRowProjection,
+  { revision: object; snapshot: ReturnType<typeof createProjectSessionStore> }
+>();
+
 export function loadProjectSessionStore(
+  projection: SessionRowProjection,
+  memoryStores: MemoryProjectStores,
+) {
+  // Private actors have a request-scoped disclosure lifetime, outside the durable revision.
+  if (memoryStores.some((source) => source.entries.length > 0)) {
+    return createProjectSessionStore(projection, memoryStores);
+  }
+  const { revision } = projection.state;
+  let cached = projectSessionStores.get(projection);
+  if (cached?.revision !== revision) {
+    cached = { revision, snapshot: createProjectSessionStore(projection, memoryStores) };
+    projectSessionStores.set(projection, cached);
+  }
+  return cached.snapshot;
+}
+
+function createProjectSessionStore(
   projection: SessionRowProjection,
   memoryStores: MemoryProjectStores,
 ) {
@@ -74,9 +96,10 @@ export function loadProjectSessionStore(
     { metadataPrepared: true, ordered: true },
   );
   const paths = projection.state.scope({}).paths;
-  const targets = new Map(selection.entries.map(([key]) => [key, selection.getTarget(key)!]));
+  const selectedEntries = selection.entries("all");
+  const targets = new Map(selectedEntries.map(([key]) => [key, selection.getTarget(key)!]));
   // Stable locale-equal recency ties retain physical-store and SQLite binary key order.
-  const entries = selection.entries
+  const entries = selectedEntries
     .map(([key, entry]) => ({
       key,
       entry,
@@ -94,8 +117,8 @@ export function loadProjectSessionStore(
       privateAgents.set(sessionKey, source.agentId);
     }
   }
-  return {
-    store,
+  return Object.freeze({
+    store: Object.freeze(store),
     agentId: (key: string) => privateAgents.get(key) ?? targets.get(key)?.agentId,
     assertCurrent(keys: Iterable<string>) {
       for (const key of keys) {
@@ -128,5 +151,5 @@ export function loadProjectSessionStore(
         }
       }
     },
-  };
+  });
 }
