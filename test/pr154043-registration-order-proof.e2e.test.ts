@@ -1,13 +1,13 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { materializeRequesterScopedMcpToolsForHarnessRun } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { describe, expect, it } from "vitest";
+import { disposeAllSessionMcpRuntimes } from "../src/agents/agent-bundle-mcp-manager-api.js";
 import {
   createSessionMcpRuntimeManager,
   makeRequesterParams,
 } from "../src/agents/agent-bundle-mcp-manager.test-support.js";
 import { startRequesterScopedMcpProofServer } from "../src/agents/agent-bundle-mcp-requester.test-support.js";
 import { SESSION_MCP_RUNTIME_MANAGER_KEY } from "../src/agents/agent-bundle-mcp-runtime-shared.js";
-import { testing } from "../src/agents/agent-bundle-mcp-runtime.js";
 import { partitionMcpServersByConnectionScope } from "../src/agents/mcp-connection-resolver.js";
 import { createMcpProofPluginRegistry } from "../src/agents/mcp-connection-resolver.test-fixtures.js";
 import { withPluginRuntimeRegistryScope } from "../src/plugins/runtime/gateway-request-scope.js";
@@ -113,7 +113,7 @@ describe("PR #154043 registration-order proof", () => {
         });
       } finally {
         await allowedTools?.dispose();
-        await testing.resetSessionMcpRuntimeManager();
+        await disposeAllSessionMcpRuntimes();
         if (hadRuntimeManager) {
           singletonStore[SESSION_MCP_RUNTIME_MANAGER_KEY] = previousRuntimeManager;
         } else {
