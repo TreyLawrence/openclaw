@@ -276,8 +276,9 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +1: approved jsonPathValue on the experimental database-engine worker entrypoint.
       // +11: approved experimental engine-owned search capabilities on existing entrypoints.
       // +1: approved boot-selected family lookup on the database-engine runtime.
+      // +1: shared auth-patch application replaces manual plugin config merging.
+      3776,
       // +2: #154043 adds runWithMcpRequestMetadata and the McpServerRequestContext type.
-      3775,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(
@@ -315,8 +316,9 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +1: the same approved database-engine JSON path helper.
       // +1: the same engine-owned search admission helper.
       // +1: the same boot-selected family lookup.
+      // +1: the same shared auth-patch application.
       // +1: #154043 adds runWithMcpRequestMetadata.
-      2199,
+      2200,
       env,
     ),
     publicDeprecatedExports: readPluginSdkSurfaceBudgetEnv(

@@ -63,7 +63,6 @@ export function useSessionMenuEntries(
   host: HTMLElement,
   actions: SessionMenuActions,
   readState: () => MenuState,
-  revision: () => number,
   options: { openInExtra?: () => readonly MenuEntry[] } = {},
 ) {
   const owner = getOwner();
@@ -78,12 +77,9 @@ export function useSessionMenuEntries(
     (kind) => actions.actionDisabled(kind),
     (action) => actions.runAction(action),
   );
-  const details = useSessionMenuDetails(actions, readState, disabled, revision);
+  const details = useSessionMenuDetails(actions, readState, disabled);
   const multipleOwners = actions.ownerMenu.multipleOwners;
-  const involvementAvailable = createMemo(() => {
-    revision();
-    return actions.involvementAvailable;
-  });
+  const involvementAvailable = createMemo(() => actions.involvementAvailable);
   let appearanceContent: JSX.Element;
   let snoozeEntries: ReturnType<typeof useSessionSnoozeEntries> | undefined;
   const icon = (name: IconName) => (
@@ -151,7 +147,8 @@ export function useSessionMenuEntries(
           ) : undefined}
         </>
       ),
-      children: state.compact ? undefined : body(entry.view),
+      children: state.compact ? undefined : () => body(entry.view),
+      prewarm: entry.view === "assign-owner",
       closeOnSelect: false,
       onBeforeShow: entry.view === "icon" ? appearance.prepare : undefined,
     };
