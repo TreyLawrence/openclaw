@@ -439,6 +439,7 @@ function createAggregateCancellation(items: readonly FollowupRun[]): AggregateCa
     admit: () => {
       // Before admission every source remains independently cancellable. Once
       // atomic, only the latest source owns aggregate client cancellation.
+      // Original operator-grant revocation stays bound separately to the run.
       for (const signal of signals) {
         if (signal !== ownerSignal) {
           disposeSignal(signal);

@@ -685,7 +685,8 @@ if (uiE2eSelection) {
 // Keep its browser-only contracts scoped to their interaction and style owners.
 const uiWebkitOwners = [
   "ui/vitest.config.ts",
-  "ui/src/components/{web-awesome*,modal-dialog*,tooltip*,menu-*,overlay*,composer-menu*,dropdown-menu*,anchored-overlay*,textarea-token-anchor*,panel-tab-strip*,select-picker*,multi-select*,agent-select*,lobster-pet*,session-group-defaults-dialog*}.{ts,tsx}",
+  "ui/src/components/{control-theme*,modal-dialog*,tooltip*,menu-*,overlay*,composer-menu*,dropdown-menu*,anchored-overlay*,textarea-token-anchor*,panel-tab-strip*,select-picker*,multi-select*,agent-select*,lobster-pet*,session-group-defaults-dialog*}.{ts,tsx}",
+  "ui/src/components/{session-hovercard*,solid/session-hovercard*}.{ts,tsx,css}",
   "ui/src/app/app-shell-chrome.ts",
   "ui/src/pages/{cron/view-jobs-filter,plugins/settings-editor,plugins/settings-view}.{ts,tsx,css}",
   "ui/src/pages/chat/chat-composer*.{ts,tsx}",
@@ -1199,6 +1200,7 @@ const shardRequiresTests = (shard, tests, fallback) =>
       : fallback(plan);
   });
 // The same capped matrix owns compact and plugin work; admit its longest rows first.
+const packedNodeTestRows = [];
 const nodeTestShards = targetNodeTestShards
   .toSorted(
     (a, b) =>
@@ -1300,8 +1302,51 @@ const nodeTestShards = targetNodeTestShards
         delete row.shard_name;
       }
     }
+    if (packedGroups) {
+      packedNodeTestRows.push({ row, groups });
+    }
     return row;
   });
+const nodeTestGroupPools = {};
+if (
+  typeof nodeTestGroupsCodec?.decodeNodeTestGroups === "function" &&
+  packedNodeTestRows.reduce((size, { row }) => size + row.groups_gzip_base64.length, 0) > 128_000
+) {
+  // Compress repeated paths across rows, without changing the runner's per-row contract.
+  // Each pool stays below Linux's per-environment-string limit, including base64 overhead.
+  let pool = [];
+  let rows = [];
+  const flush = () => {
+    const poolKey = `pool-${Object.keys(nodeTestGroupPools).length + 1}`;
+    nodeTestGroupPools[poolKey] = encodeNodeTestGroups(pool);
+    rows.forEach((row, index) => {
+      row.groups_pool = poolKey;
+      row.groups_index = index;
+      delete row.groups_gzip_base64;
+    });
+    pool = [];
+    rows = [];
+  };
+  for (const { row, groups } of packedNodeTestRows) {
+    // Oversized individual descriptors retain their existing standalone transport.
+    if (row.groups_gzip_base64.length > 60_000) {
+      continue;
+    }
+    if (encodeNodeTestGroups([...pool, groups]).length > 60_000) {
+      if (pool.length) {
+        flush();
+      }
+      if (encodeNodeTestGroups([groups]).length > 60_000) {
+        continue;
+      }
+    }
+    pool.push(groups);
+    rows.push(row);
+  }
+  if (pool.length) {
+    flush();
+  }
+}
 const nodeTestNonDistShards = nodeTestShards.filter((shard) => !shard.requires_dist);
 // Bound the final matrix: precise plans and appended plugin rows can bypass compact caps.
 if (compactPlanMode && nodeTestNonDistShards.length > nodeMatrixLimit) {
@@ -1529,6 +1574,7 @@ const manifest = {
   source_channel_test_env_json: JSON.stringify(sourceChannelTestEnv),
   run_checks_node_core_nondist: nodeTestNonDistShards.length > 0,
   checks_node_core_nondist_matrix: createMatrix(nodeTestNonDistShards),
+  node_test_group_pools_json: JSON.stringify(nodeTestGroupPools),
   run_checks_node_core_dist: runNodeCoreDist,
   run_check: runCheck,
   // Older scope owners retain these guards rather than silently dropping coverage.
@@ -1626,8 +1672,8 @@ const manifest = {
   run_macos_node: runMacosNode,
   macos_node_matrix: createMatrix(
     runMacosNode
-      ? [1, 2, 3].every((part) => hasPackageScript(`test:macos:ci:${part}`))
-        ? [1, 2, 3].map((part) => ({
+      ? [1, 2].every((part) => hasPackageScript(`test:macos:ci:${part}`))
+        ? (hasPackageScript("test:macos:ci:3") ? [1, 2, 3] : [1, 2]).map((part) => ({
             check_name: `macos-node-${part}`,
             runtime: "node",
             task: `test-${part}`,
@@ -1740,7 +1786,10 @@ if (hybridHostedEligible) {
   hybridHostedBaseRows = Object.values({
     preflight: count(ciQualification || hostedHybridControls),
     "ci-gate": count(hostedHybridControls),
-    "check-plan": count(hostedPlanner && runCheckPlan),
+    "check-plan": count(
+      (hostedPlanner || (hostedHybridControls && workflowEventName === "pull_request")) &&
+        runCheckPlan,
+    ),
     "pr-failure-report": count(
       workflowEventName === "pull_request" &&
         (hostedHybridControls ||

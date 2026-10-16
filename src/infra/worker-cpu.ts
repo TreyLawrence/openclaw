@@ -1,4 +1,5 @@
 import "../../worker-heap-flag.mjs";
+import { channel } from "node:diagnostics_channel";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMainThread, MessagePort, Worker } from "node:worker_threads";
@@ -253,6 +254,12 @@ function trackWorker(worker: WorkerCpuHandle): void {
     // oxlint-disable-next-line typescript/unbound-method -- call preserves custom own/subclass methods and the receiver.
     const emit = !nativePrototype || Object.hasOwn(worker, "emit") ? worker.emit : undefined;
     worker.emit = function (this: Worker, event: string | symbol, ...args: unknown[]) {
+      if (event === "error" && source.script === "code-mode-node.worker.js") {
+        // Capture native failure before the pool's generic failure/close cleanup runs.
+        const error = args[0];
+        source.retirementReason ??=
+          isRecord(error) && error.code === "ERR_CODE_MODE_GC_THRASH" ? "gc-thrash" : "crash";
+      }
       if (event === "message") {
         if (source.lifecycleMessages) {
           recordWorkerMessage("lifecycle", "from_worker", workerMessagePayloadBytes(args[0]));
@@ -372,7 +379,18 @@ export function receiveWorkerMemoryPort(worker: WorkerCpuHandle, message: unknow
   };
   port.on(
     "message",
-    (record: WorkerMemorySample | { gc: GcSample[] } | { gcStorm: WorkerGcStorm }) => {
+    (
+      record:
+        | WorkerMemorySample
+        | { gc: GcSample[] }
+        | { gcStorm: WorkerGcStorm }
+        | { retireWorkerId: string },
+    ) => {
+      if ("retireWorkerId" in record) {
+        recordWorkerMessage("memory", "from_worker");
+        channel("openclaw.code-mode.gc-storm").publish(record.retireWorkerId);
+        return;
+      }
       if ("gcStorm" in record) {
         recordWorkerMessage("memory", "from_worker");
         // Capture registry-owned identity before a native exit can free this slot.

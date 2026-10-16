@@ -9,7 +9,7 @@ import { setAvatarGatewayOrigin } from "../../../lib/identity-avatar-context.ts"
 import * as localStorageModule from "../../../local-storage.ts";
 import { prepareChatHistoryFixture } from "../../../test-helpers/chat-activity-fixtures.ts";
 import { waitForSolid } from "../../../test-helpers/solid-settle.ts";
-import * as chatAvatar from "../chat-avatar.ts";
+import * as chatAvatar from "../chat-avatar-view.tsx";
 import { attachHistoryActivity } from "../chat-history-request.ts";
 import { buildCachedChatItems } from "../chat-thread.ts";
 import { agentEvent, createHost } from "../tool-stream.test-helpers.ts";
@@ -71,9 +71,11 @@ beforeEach(() => {
   vi.spyOn(localStorageModule, "getSafeLocalStorage").mockImplementation(getSafeLocalStorageMock);
   vi.spyOn(markdown, "toSanitizedMarkdownHtml").mockImplementation(markdownRenderMock);
   vi.spyOn(markdown, "toStreamingMarkdownParts").mockImplementation(streamingMarkdownRenderMock);
-  vi.spyOn(chatAvatar, "renderChatAvatar").mockImplementation(
-    (role) => html`<div class="chat-avatar ${role}"></div>`,
-  );
+  vi.spyOn(chatAvatar, "ChatAvatar").mockImplementation((props) => {
+    const avatar = document.createElement("div");
+    avatar.className = `chat-avatar ${props.role}`;
+    return avatar;
+  });
 });
 
 type RenderMessageGroupOptions = Parameters<typeof renderMessageGroup>[1];
@@ -2601,7 +2603,7 @@ describe("grouped chat rendering", () => {
     const thumbnailUrl = `${ticketedUrl.replace(/\/full(?=\?)/u, "/thumbnail")}&v=4&width=480`;
     const resolveArtifactDownload = vi.fn(async () => ({ url: ticketedUrl }));
     const objectUrls = ["blob:thumbnail", "blob:full", "blob:download"];
-    stubObjectUrls(() => objectUrls.shift() ?? "blob:extra");
+    const { revokeObjectURL } = stubObjectUrls(() => objectUrls.shift() ?? "blob:extra");
     const imageBlob = new Blob(["png"], { type: "image/png" });
     const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => ({
       ok: true,
@@ -2630,6 +2632,8 @@ describe("grouped chat rendering", () => {
         container.querySelector(".chat-image-actions .oc-menu")!.matches(":popover-open"),
       ).toBe(true),
     );
+    // Own the delayed download cleanup before restoring the URL globals.
+    vi.useFakeTimers();
     container
       .querySelector<HTMLButtonElement>('.chat-image-actions [data-value="download"]')!
       .click();
@@ -2640,6 +2644,9 @@ describe("grouped chat rendering", () => {
       1,
     );
     expect(resolveArtifactDownload).toHaveBeenCalledTimes(2);
+    expect(revokeObjectURL).not.toHaveBeenCalledWith("blob:download");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:download");
     container.remove();
   });
 

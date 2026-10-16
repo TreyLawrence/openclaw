@@ -1567,12 +1567,9 @@ const reviewedOperations = new Map([
     [
       {
         tier: "W",
-        operations: [
-          "readActiveCronRunReceiptOwnersInDatabase",
-          "readActiveCronRunReceiptsInDatabase",
-        ],
+        operations: ["readActiveCronRunReceiptsInDatabase"],
         evidence:
-          "read-command.ts currentReceipt/activeReceiptOwners and run-recovery.read.ts route through openclaw-state-read.worker.ts; remaining direct callers are run-admission.worker.ts and runtime-maintenance.worker.ts",
+          "read-command.ts currentReceipt and run-recovery.read.ts route through openclaw-state-read.worker.ts; remaining direct callers are run-admission.worker.ts and runtime-maintenance.worker.ts",
       },
     ],
   ],
@@ -3115,6 +3112,7 @@ const workerModules = new Set([
   "extensions/memory-core/src/memory/manager-chunk-writer.ts", // Only manager-source-index-kernel.ts calls this writer, from manager-publication.worker.ts.
   "extensions/memory-core/src/memory/manager-source-index-kernel.ts", // Hash reads and source mutations are called only by manager-publication.worker.ts.
   "extensions/memory-core/src/memory/manager-retrieval-read.ts", // Search and publication workers own all SQL; host imports are types or the metadata key.
+  "extensions/memory-core/src/memory/manager-search.ts", // Only manager-search.worker.ts executes keyword SQL; host imports are the pure prepareExactPathMatcher helper or types.
   "extensions/memory-core/src/memory/manager-vector-rebuild-state.ts", // Retrieval, source-index and database-publication kernels run in the search/publication workers; the host consumes published vector facts.
 
   "extensions/team-reports/src/store-database.ts", // Only store.worker.ts and offline port workers admit this schema.
@@ -3507,6 +3505,8 @@ export function inventory(root = defaultRoot, ref = "", staged = false) {
     texts,
     (file, operation) => classify(file, operation).tier !== "T1",
     classifyKnownEntry,
+    // Historical snapshots supply counts; only current-source diagnostics are consumed below.
+    !ref,
   );
   if (!ref && compatibility.violations.length > 0) {
     throw new Error(

@@ -128,7 +128,9 @@ local tool calls are also denied, with at most two additional inference attempts
 On Anthropic, changing tool choice invalidates the messages cache, but preserves
 the tool and system caches. Other APIs without a supported hosted-tool prohibition
 are rejected when the recorded request contains tools.
-Snapshots stay in bounded process memory until expiry or session cleanup.
+The built-in runtime keeps snapshots for up to 90 minutes, with a shared 64 MiB
+request-data budget and at most 1,000 sessions, until expiry or session cleanup.
+Keeping a snapshot does not retain the completed parent session or its transcript manager.
 The built-in runtime retains the prepared provider prefix instead of a second copy
 of conversation history. Forks convert only later publications and the side question;
 HTTP continuations retain the full prefix even when the parent sends only a suffix.
@@ -428,6 +430,12 @@ SQLite worker backends set connection lock-wait policy with
 temporary changes. The connection owner retains the current timeout, skips
 unchanged assignments, and discards it on close; raw timeout PRAGMAs on an owned
 connection would bypass that policy.
+
+Connection-bound backends use `bindSqliteWorkerDatabase(db, backend)` from the
+same entrypoint for scope closure and synchronous transaction settlement checks.
+The backend supplies its command implementation and optional preparation or
+scope cleanup; it never closes the borrowed database. Transaction and commit
+admission remain with the executor and the store's write operation.
 
 Worker kernels that write derived data without changing any session facts wrap
 their synchronous DML in `withSqliteDatabaseWriteScope(db, [], write)` from the
