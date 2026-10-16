@@ -302,6 +302,33 @@ export function createPluginRuntimeResolver(state: PluginRegistryState) {
                   selectedRegistry,
                   getRuntimeConfig(),
                   record.id,
+                  () => {
+                    assertRuntimeCurrent();
+                    return true;
+                  },
+                ),
+              );
+              assertRuntimeCurrent();
+              options.signal.throwIfAborted();
+              return result;
+            },
+            evaluateV2: async (batch, options) => {
+              assertRuntimeCurrent();
+              const capturedRegistry = currentDecisionRegistry();
+              const { evaluateDecisionV2InRegistry } = await import("../decisions/runtime.js");
+              assertRuntimeCurrent();
+              const selectedRegistry = currentDecisionRegistry(capturedRegistry);
+              const result = await withPluginRuntimeRegistryScope(selectedRegistry, () =>
+                evaluateDecisionV2InRegistry(
+                  batch,
+                  options,
+                  selectedRegistry,
+                  getRuntimeConfig(),
+                  record.id,
+                  () => {
+                    assertRuntimeCurrent();
+                    return true;
+                  },
                 ),
               );
               assertRuntimeCurrent();

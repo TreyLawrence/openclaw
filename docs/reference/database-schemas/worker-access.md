@@ -4943,6 +4943,9 @@ bound to the captured owner, and shutdown joins accepted work. The existing
 update behavior are unchanged. Drain inspection reads pending and claimed rows in
 one snapshot so a concurrent release cannot hide a lane head between reads.
 Shutdown joins deferred settlement even when it starts before dispatch returns.
+Accepted enqueues, claims, and resubmissions return the mutation's row directly;
+only duplicate enqueues read the retained row. Claims atomically update pending
+rows, and corrupt payloads are tombstoned in that same writer transaction.
 
 Inbound envelope timestamps use the existing session read worker. Bundled channels
 await preparation at their formatting boundary and carry the timestamp through
@@ -5948,9 +5951,10 @@ in the same synchronous consuming frame. Personal skill-library storage, exec-po
 eligibility, and incognito memory state remain with their respective owners.
 This changes no SDK, RPC schema, stored data, permission, or update contract.
 
-For writes, shared-state domain operations registered by
-`src/state/openclaw-state-worker-runtime.ts` reuse the broker and publish results
-through their original store/projection owner.
+For writes, shared-state domain operations load on demand through
+`src/state/openclaw-state-worker-registry.ts`, reuse the broker, and publish results
+through their original store/projection owner. Cron preparation and the retained
+update-run writer remain owned by the shared-state backend.
 
 Native subagent completion, recovery, and delivery settlement use the subagent
 registry and its retained run records, not a Task projection or detached-task SDK

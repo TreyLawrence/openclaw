@@ -910,10 +910,11 @@ function buildAllowedModelSetFromPrepared(
     visibility,
     policyAliasIndex,
     metadata,
-    catalog,
+    catalog: inventory,
     defaultRef,
   }: ReturnType<typeof prepareModelPolicy>,
 ): AllowedModelSet {
+  const catalog = inventory.filter((entry) => entry.inference?.chat !== false);
   const wildcardModelKeys = visibility.wildcardModelKeys;
   const allowAny = !visibility.hasEntries;
   const defaultKey = defaultRef ? modelKey(defaultRef.provider, defaultRef.model) : undefined;
