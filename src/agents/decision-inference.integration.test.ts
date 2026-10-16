@@ -1,11 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { setRuntimeConfigSnapshot, clearRuntimeConfigSnapshot } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { DecisionProviderContextV2 } from "../decisions/provider-context.js";
-import type { DecisionRuntimeV2 } from "../decisions/types-v2.js";
+import type { DecisionBatchResultV2, DecisionRuntimeV2 } from "../decisions/types-v2.js";
+import {
+  onTrustedInternalDiagnosticEvent,
+  resetDiagnosticEventsForTest,
+  type DiagnosticEventPayload,
+} from "../infra/diagnostic-events.js";
+import { markTrustedOtelDiagnosticListener } from "../infra/diagnostic-otel-listener-provenance.js";
 import { loadAndActivateRootPluginRegistry } from "../plugins/loader.js";
 import { resetPluginLoaderTestStateForTest } from "../plugins/loader.test-fixtures.js";
 import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-lifecycle.js";
@@ -36,6 +42,7 @@ type Trace = {
   fetch?: typeof fetch;
   work?: Promise<void>;
   authenticated: boolean;
+  usage?: DecisionBatchResultV2["usage"];
   modelKeys?: string[];
   profileId?: string;
   agentId?: string;
@@ -54,6 +61,7 @@ afterEach(async () => {
   clearRuntimeConfigSnapshot();
   clearPluginMetadataLifecycleCaches();
   resetPluginLoaderTestStateForTest();
+  resetDiagnosticEventsForTest();
   Reflect.deleteProperty(globalThis, traceKey);
   await profileState?.cleanup();
   profileState = undefined;
@@ -110,9 +118,11 @@ it.each([
                     chat: authScope === "exchange",
                     decision: {
                       protocol: "fixture",
-                      ...(authScope === "exchange"
-                        ? { billing: { unit: "requests", source: "provider-catalog" } }
-                        : {}),
+                      billing: {
+                        unit: "tokens",
+                        source: "provider-catalog",
+                        usdPerMillion: { input: 2, output: 0 },
+                      },
                       input: ["text"],
                       questions: { boolean: { probabilities: "none", abstention: true } },
                     },
@@ -143,11 +153,15 @@ it.each([
             ? 'normalizeResolvedModel(context) { return { ...context.model, api: "openai-responses" }; }, prepareRuntimeAuth(context) { trace.preparedApi=context.model.api; return { apiKey: context.apiKey, baseUrl: "https://entitlement.fixture.invalid/v1", request: { headers: { "x-fixture-entitlement": "synthetic-entitlement" }, auth: { mode: "header", headerName: "x-fixture-auth", value: "synthetic-exchanged-header" } } }; },'
             : "") +
           "} ,",
-        'async evaluate(batch, context) { trace.calls++; trace.profileId=context.auth.profileId; trace.agentId=context.agentId; trace.onDispatch?.(); await trace.work; trace.beforeRequest?.(context); if (!context.isAdmissible()) return { status: "unavailable", reason: "unsupported-input" }; await trace.fetch?.("https://dispatch.fixture.invalid/v1/decisions", { method: "POST" }); trace.authenticated = context.auth.apiKey === "synthetic-prepared-token"; trace.modelKeys = Object.keys(context.model); trace.modelContextWindow = context.model.contextWindow; trace.modelBilling=context.model.inference?.decision?.billing; trace.modelBaseUrl=context.model.baseUrl; trace.modelHeaders=context.model.headers; trace.modelRequest=context.model[Symbol.for("openclaw.modelProviderRequestTransport")]; trace.modelApi=context.model.api; let reads = 0; return { status: "ok", get result() { trace.resultReads = ++reads; return { model: context.model.id, answers: { q: reads === 1 ? { type: "boolean", answer: null } : { type: "boolean", probabilityTrue: 0.75 } }, usage: { inputTokens: 1, costUsd: 0.002 } }; } }; }',
+        'async evaluate(batch, context) { trace.calls++; trace.profileId=context.auth.profileId; trace.agentId=context.agentId; trace.onDispatch?.(); await trace.work; trace.beforeRequest?.(context); if (!context.isAdmissible()) return { status: "unavailable", reason: "unsupported-input" }; await trace.fetch?.("https://dispatch.fixture.invalid/v1/decisions", { method: "POST" }); trace.authenticated = context.auth.apiKey === "synthetic-prepared-token"; trace.modelKeys = Object.keys(context.model); trace.modelContextWindow = context.model.contextWindow; trace.modelBilling=context.model.inference?.decision?.billing; trace.modelBaseUrl=context.model.baseUrl; trace.modelHeaders=context.model.headers; trace.modelRequest=context.model[Symbol.for("openclaw.modelProviderRequestTransport")]; trace.modelApi=context.model.api; let reads = 0; return { status: "ok", get result() { trace.resultReads = ++reads; return { model: context.model.id, answers: { q: reads === 1 ? { type: "boolean", answer: null } : { type: "boolean", probabilityTrue: 0.75 } }, usage: trace.usage }; } }; }',
         "}); trace.evaluate = api.runtime.decisions.evaluateV2; } };",
       ].join("\n"),
     );
-    const trace: Trace = { calls: 0, authenticated: false };
+    const trace: Trace = {
+      calls: 0,
+      authenticated: false,
+      usage: { inputTokens: 100, costUsd: 0 },
+    };
     Reflect.set(globalThis, traceKey, trace);
     if (authScope === "profile") {
       profileState = await createOpenClawTestState({
@@ -227,6 +241,16 @@ it.each([
       if (!evaluate) {
         throw new Error("Decision registration omitted its runtime capability");
       }
+      const usageEvents: Array<Extract<DiagnosticEventPayload, { type: "model.usage" }>> = [];
+      onTestFinished(
+        onTrustedInternalDiagnosticEvent(
+          markTrustedOtelDiagnosticListener((event) => {
+            if (event.type === "model.usage") {
+              usageEvents.push(event);
+            }
+          }),
+        ),
+      );
       const http = vi.fn<typeof fetch>(async () => new Response("{}"));
       let admitted = true;
       if (authScope.startsWith("plugin-revoked")) {
@@ -271,19 +295,21 @@ it.each([
               return outcome;
             }
           : evaluate;
-      const outcome = await invoke(
-        {
-          state: { type: "text", text: "synthetic evidence" },
-          questions: { q: { type: "boolean" } },
-        },
-        {
-          ...(authScope === "profile" ? { agentId: "main" } : {}),
-          purpose: "fixture",
-          rubricVersion: "v2",
-          timeoutMs: 5000,
-          signal: new AbortController().signal,
-        },
-      );
+      const evaluateFixture = () =>
+        invoke(
+          {
+            state: { type: "text", text: "synthetic evidence" },
+            questions: { q: { type: "boolean" } },
+          },
+          {
+            ...(authScope === "profile" ? { agentId: "main" } : {}),
+            purpose: "fixture",
+            rubricVersion: "v2",
+            timeoutMs: 5000,
+            signal: new AbortController().signal,
+          },
+        );
+      const outcome = await evaluateFixture();
       if (authScope.startsWith("plugin-revoked")) {
         expect(outcome).toEqual({
           status: "unavailable",
@@ -294,12 +320,14 @@ it.each([
         });
         expect(trace.calls).toBe(1);
         expect(http).not.toHaveBeenCalled();
+        expect(usageEvents).toEqual([]);
         expect(registry.decisionProviders[0]!.host.inspect(cfg).callable).toBe(true);
         return;
       }
       if (authScope === "missing") {
         expect(outcome).toEqual({ status: "unavailable", reason: "credentials-unavailable" });
         expect(trace.calls).toBe(0);
+        expect(usageEvents).toEqual([]);
         return;
       }
       expect(
@@ -310,7 +338,7 @@ it.each([
         }),
       ).toMatchObject({
         status: "ok",
-        result: { answers: { q: { answer: null } }, usage: { costUsd: 0.002 } },
+        result: { answers: { q: { answer: null } }, usage: { costUsd: 0 } },
       });
       expect(trace.calls).toBe(1);
       expect(trace.resultReads).toBe(1);
@@ -318,6 +346,27 @@ it.each([
       if (authScope === "profile") {
         expect(trace.profileId).toBe(id + ":agent");
         expect(trace.agentId).toBe("main");
+      }
+      expect(usageEvents).toEqual([
+        expect.objectContaining({
+          provider: id,
+          model: "native",
+          usage: { input: 100 },
+          costUsd: 0,
+        }),
+      ]);
+      trace.usage = { inputTokens: 100 };
+      const unpriced = await evaluateFixture();
+      expect(unpriced.status).toBe("ok");
+      if (unpriced.status === "ok") {
+        expect(unpriced.result.usage).toEqual({ inputTokens: 100 });
+      }
+      expect(usageEvents).toHaveLength(2);
+      if (authScope === "plugin") {
+        expect(usageEvents[1]?.costUsd).toBe(0.0002);
+      } else {
+        // API normalization and exchanged endpoints both invalidate catalog-route prices.
+        expect(usageEvents[1]).not.toHaveProperty("costUsd");
       }
       if (authScope === "exchange") {
         expect(trace.modelBaseUrl).toBe("https://entitlement.fixture.invalid/v1");
@@ -376,7 +425,7 @@ it.each([
             },
           ),
         ).resolves.toMatchObject({ status: "unavailable", reason: "credentials-unavailable" });
-        expect(trace.calls).toBe(1);
+        expect(trace.calls).toBe(2);
         setRuntimeConfigSnapshot(cfg);
       }
 
@@ -410,6 +459,7 @@ it.each([
       expect(registry.decisionProviders[0]!.host.inspect(cfg).activeRequests).toBe(1);
       finish();
       await expect(pending).rejects.toThrow("fixture cancelled");
+      expect(usageEvents).toHaveLength(2);
       expect(registry.decisionProviders[0]!.host.inspect(cfg).activeRequests).toBe(0);
       await resetPreparedModelRuntimeSnapshotsForTest();
     });

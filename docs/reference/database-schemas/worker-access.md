@@ -50,6 +50,13 @@ and the agent's
 The lifecycle owner closes its read scope and drains accepted writes before
 retiring the store.
 
+Gateway boot history uses one `gatewayBoot.begin` writer operation to inspect
+previous boots, prune expired history, and append the current boot. The breaker
+decision excludes that new open row; a failed append preserves a successfully
+read decision. Completion and recovery use the same worker owner, including
+in-process restarts. History remains best effort with a warning on failure;
+Doctor's explicit maintenance repair retains its synchronous exception.
+
 Retained session-entry cache hits reuse the admission owner's physical identity
 without inspecting the pathname again. Observer reads rely on that same admitted
 reader instead of capturing and rechecking every candidate file independently.
@@ -342,6 +349,14 @@ bodies for turn appends). This count excludes optional initialization headers.
 The reported `phases.sqlMs` includes synchronous JavaScript work inside the
 transaction; it is not a sum of SQLite statement timings.
 
+The model-context reader retains the latest transcript's navigation and exact model
+byte costs on its admitted connection. Appends extend the canonical branch scanner
+from the committed sequence; same-generation metadata rewrites invalidate only the
+affected 512-row pages through writer receipts. Replacement and destructive rewrites
+discard the cached generation. Payloads remain in SQL until context selection, and
+the connection releases navigation on disposal. This trades retained navigation
+metadata for bounded warm reads without changing prompt bytes or window selection.
+
 Cold input preparation uses the turn planner instead of fetching a full actor
 replica first. The planner carries its recovery expectation into the input
 command; prepared, explicit, and warm replica expectations remain fixed across
@@ -405,14 +420,23 @@ Generic callbacks retain their prepare-and-compare contract, and source and
 conversation authority still apply at the mutation boundary. These operations
 change no schemas, stored formats, retention, or update behavior.
 
+New subagent keys select their configured store without searching historical
+session rows. Custom store selectors still resolve physical ownership in the
+worker; a parent's historical store does not redirect its new child.
 Fresh isolated same-agent subagents commit first-admission metadata with their
-creation entry. The host-bound launch carries that postimage into first admission,
-avoiding a second load, generic reuse preparation, and metadata patch. The receipt
-is consumed once and grants no authority: the work lease still loads the current
+creation entry. The host-bound launch carries that postimage and admitted store
+through first admission and input staging, avoiding target rediscovery, generic
+reuse preparation, and metadata patch. The receipt is consumed once and grants
+no authority: the work lease still loads the current
 entry and rejects replacement or reset before execution. Current policy and
 metadata writes therefore survive admission. Forks, resumed children, incognito
 storage, collectors, thread binding, and cross-agent admission keep their existing
 paths.
+
+Command preparation persists only its refreshed skill snapshot and activity
+fields through one fixed-field operation. It does not restore unrelated fields
+from an earlier snapshot or recreate a deleted session. Fresh sessions still
+discover their own skill dependencies.
 
 Observer digests and activity recaps also use closed entry operations. Their writer
 checks the current lifecycle, digest revision, recap eligibility, and transcript
@@ -2627,7 +2651,11 @@ reviewed worker-only entries. The event recorder's `registeredWatcherKeys`
 initializer is classified separately from its native event/head SQL.
 Creation, compaction, adoption, and child-spawn producers are non-notifying.
 Creation, compaction, adoption, child-spawn cursor seeding, reset/deletion cleanup,
-and periodic retention use the existing signal worker. Placement restart clearing
+and periodic retention use the existing signal worker. Child creation and spawn
+signals share one ordered transaction, preserving their dedupe keys and the
+parent's seeded cursor.
+These advisory signals fail together without replaying child creation; the Home
+notice remains independently best effort. Placement restart clearing
 uses the placement lifecycle worker before turns are admitted and while startup
 holds the state-directory lock. Its `UPDATE ... RETURNING` captures exact
 postimages, which the host publishes after success. An uncertain result fails

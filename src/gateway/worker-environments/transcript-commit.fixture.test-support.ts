@@ -21,7 +21,7 @@ import {
 } from "./transcript-commit.test-support.js";
 
 export const SESSION_KEY = "agent:main:worker-transcript";
-export const ORIGINAL_REVISION = "worker-original-revision";
+const ORIGINAL_REVISION = "worker-original-revision";
 export const IDENTITY = createTranscriptCommitIdentity(SESSION_ID, RUN_EPOCH);
 
 export function expectedCommitReceipt(entryIds: string[]) {

@@ -82,6 +82,99 @@ function native(evaluate: DecisionProviderV2["evaluate"]) {
   return { ...builder, record, api };
 }
 
+it.each([1, 2] as const)(
+  "shares V1/V2 priority admission and physical settlement on a V%d provider",
+  async (providerVersion) => {
+    const started = Array.from({ length: 4 }, () => createDeferredCore());
+    const release = Array.from({ length: 4 }, () => createDeferredCore());
+    const cancelled = new AbortController();
+    let calls = 0;
+    const callback = async () => {
+      const index = calls++;
+      if (index < release.length) {
+        started[index]!.resolve();
+        // Both native and bridged calls keep their slots through abort-ignoring cleanup.
+        await release[index]!.promise;
+      }
+      return answer;
+    };
+    const host = providerVersion === 1 ? registered(callback) : native(callback);
+    setRuntimeConfigSnapshot(config);
+    const providerHost = host.registry.decisionProviders[0]!.host;
+    const evaluate = (version: 1 | 2, requestOptions: DecisionEvaluateOptionsV2) =>
+      version === 1
+        ? host.api.runtime.decisions.evaluate(batch, requestOptions)
+        : host.api.runtime.decisions.evaluateV2(richer, requestOptions);
+    const pending: ReturnType<typeof evaluate>[] = [];
+    const overloaded = { status: "unavailable", reason: "overloaded" };
+    try {
+      for (const [index, priority] of (["optional", "requested", "optional"] as const).entries()) {
+        const request = evaluate(index === 1 ? 1 : 2, {
+          ...options(),
+          priority,
+          ...(index === 0 ? { signal: cancelled.signal } : {}),
+        });
+        pending.push(request);
+        await Promise.race([started[index]!.promise, request]);
+        expect(calls).toBe(index + 1);
+      }
+      for (const version of [1, 2] as const) {
+        await expect(evaluate(version, { ...options(), priority: "optional" })).resolves.toEqual(
+          overloaded,
+        );
+      }
+      expect(calls).toBe(3);
+      const fourth = evaluate(providerVersion, options());
+      pending.push(fourth);
+      await Promise.race([started[3]!.promise, fourth]);
+      expect(calls).toBe(4);
+      for (const version of [1, 2] as const) {
+        await expect(evaluate(version, options())).resolves.toEqual(overloaded);
+      }
+
+      const reason = new Error("V2 caller cancelled");
+      const rejected = expect(pending[0]!).rejects.toBe(reason);
+      cancelled.abort(reason);
+      expect(providerHost.inspect(config).activeRequests).toBe(4);
+      await expect(evaluate(2, options())).resolves.toEqual(overloaded);
+      release[0]!.resolve();
+      await rejected;
+      expect(providerHost.inspect(config).activeRequests).toBe(3);
+      for (const version of [1, 2] as const) {
+        await expect(evaluate(version, { ...options(), priority: "optional" })).resolves.toEqual(
+          overloaded,
+        );
+      }
+      expect(calls).toBe(4);
+      release[1]!.resolve();
+      await pending[1];
+      for (const version of [1, 2] as const) {
+        await expect(
+          evaluate(version, { ...options(), priority: "optional" }),
+        ).resolves.toMatchObject({ status: "ok" });
+      }
+      expect(calls).toBe(6);
+    } finally {
+      for (const releaseGate of release) {
+        releaseGate.resolve();
+      }
+      await Promise.allSettled(pending);
+    }
+    expect(providerHost.inspect(config).activeRequests).toBe(0);
+  },
+);
+
+it("rejects invalid V2 priority before provider dispatch", async () => {
+  const evaluate = vi.fn<DecisionProviderV2["evaluate"]>(async () => answer);
+  const host = native(evaluate);
+  const requestOptions = options();
+  Reflect.set(requestOptions, "priority", "urgent");
+  await expect(host.api.runtime.decisions.evaluateV2(richer, requestOptions)).rejects.toThrow(
+    "Invalid decision contract",
+  );
+  expect(evaluate).not.toHaveBeenCalled();
+});
+
 it("leaves V2 credential admission to preparation without a global readiness claim", async () => {
   const evaluate = vi.fn<DecisionProviderV2["evaluate"]>(async () => answer);
   const host = native(evaluate);

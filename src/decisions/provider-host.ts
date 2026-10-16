@@ -352,7 +352,9 @@ export class DecisionProviderHost {
     if (health.openUntil > performance.now() || health.trial) {
       return this.unavailable("circuit-open");
     }
-    if (this.pending.size >= MAX_CONCURRENT) {
+    // Optional work leaves the last physical slot for requested evaluations.
+    const limit = options.priority === "optional" ? MAX_CONCURRENT - 1 : MAX_CONCURRENT;
+    if (this.pending.size >= limit) {
       return this.unavailable("overloaded");
     }
     const halfOpen = health.openUntil > 0;

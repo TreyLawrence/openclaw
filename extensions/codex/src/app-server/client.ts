@@ -190,7 +190,6 @@ export class CodexAppServerClient {
     observeCodexAppServerStderr(child.stderr, (chunk) => {
       const text = this.redactPrivateStderr(chunk);
       this.stderrTail = appendBoundedTail(this.stderrTail, text, CODEX_APP_SERVER_STDERR_TAIL_MAX);
-      return text;
     });
     child.once("error", (error) => this.closeWithError(toStringifiedError(error)));
     child.once("exit", (code, signal) => {
@@ -608,7 +607,7 @@ export class CodexAppServerClient {
       return;
     }
     for (const failure of decoded.failures) {
-      logCodexAppServerParseFailure(failure.value, failure.error, failure.fragmentCount);
+      logCodexAppServerParseFailure(failure);
     }
     if (decoded.projectionError) {
       this.pending.get(decoded.projectionError.id)?.reject(decoded.projectionError.error, false);

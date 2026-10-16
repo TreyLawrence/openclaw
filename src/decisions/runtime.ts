@@ -118,6 +118,9 @@ async function evaluateVersion(
     typeof options.purpose !== "string" ||
     !options.purpose ||
     options.purpose.length > 128 ||
+    (options.priority !== undefined &&
+      options.priority !== "requested" &&
+      options.priority !== "optional") ||
     typeof options.rubricVersion !== "string" ||
     !options.rubricVersion ||
     options.rubricVersion.length > 128 ||

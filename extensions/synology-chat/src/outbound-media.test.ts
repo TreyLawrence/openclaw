@@ -164,6 +164,11 @@ describe("Synology Chat hosted outbound media", () => {
     vi.useRealTimers();
   });
 
+  afterEach(() => {
+    // Native worker drains use setImmediate after exit, including during afterAll cleanup.
+    vi.useRealTimers();
+  });
+
   it("requires an exact public HTTPS callback without credentials or fragments", () => {
     const credentialedUrl = new URL("https://gateway.example.com/webhook");
     credentialedUrl.username = "fixture-user";

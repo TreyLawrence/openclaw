@@ -21,6 +21,8 @@ import {
   readCursor,
   recordSessionStateEventInDatabase,
   upsertSeedCursor,
+  type SessionStateEventInput,
+  type SessionStateEventRow,
   type SessionStateNotice,
 } from "./session-state-events.kernel.js";
 import { readSessionStateSequence } from "./session-state-events.read.worker.js";
@@ -250,29 +252,37 @@ export const sessionStateOperations = {
         stage,
         facts: undefined,
       });
-    const { event, now, onlyIfWatched, expectedUpstream, acpControl } = input;
+    const { events, now, onlyIfWatched, expectedUpstream, acpControl } = input;
     const assertAcpControl = () => {
       if (acpControl && !readAcpSessionControlInWorker(database, acpControl).row) {
         throw new Error("ACP task owner could not be verified.");
       }
     };
-    const current = (db: OpenClawStateDatabase["db"]) =>
+    const current = (db: OpenClawStateDatabase["db"], event: SessionStateEventInput) =>
       (!onlyIfWatched || hasSessionStateWatchersInDatabase(db, event.sessionKey)) &&
       (!expectedUpstream || isSessionStateUpstreamCurrentInDatabase(db, expectedUpstream));
     // Unwatched human turns stay write-free; queued writes repeat the check under the lock.
-    if (!current(database.db)) {
-      return { notices: [] };
+    if (!events.some((event) => current(database.db, event))) {
+      return { rows: [], notices: [] };
     }
     return context.write(({ db }) => {
       admit("transaction");
       assertAcpControl();
-      if (!current(db)) {
-        return { notices: [] };
+      const rows: SessionStateEventRow[] = [];
+      const notices: SessionStateNotice[] = [];
+      for (const event of events) {
+        if (!current(db, event)) {
+          continue;
+        }
+        const recorded = recordSessionStateEventInDatabase(db, event, now);
+        if (recorded.row) {
+          rows.push(recorded.row);
+        }
+        notices.push(...recorded.notices);
       }
-      const recorded = recordSessionStateEventInDatabase(db, event, now);
       admit("commit");
       assertAcpControl();
-      return recorded;
+      return { rows, notices };
     });
   },
 } satisfies WorkerOperationHandlers<WorkerWriteOperationContext>;
