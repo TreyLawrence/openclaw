@@ -275,8 +275,9 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +1: isHostNoticePayload for agent-to-agent reply filtering.
       // +1: approved jsonPathValue on the experimental database-engine worker entrypoint.
       // +11: approved experimental engine-owned search capabilities on existing entrypoints.
+      // +1: approved boot-selected family lookup on the database-engine runtime.
       // +2: #154043 adds runWithMcpRequestMetadata and the McpServerRequestContext type.
-      3774,
+      3775,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(
@@ -313,8 +314,9 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +1: the same host-notice classifier on reply-payload.
       // +1: the same approved database-engine JSON path helper.
       // +1: the same engine-owned search admission helper.
+      // +1: the same boot-selected family lookup.
       // +1: #154043 adds runWithMcpRequestMetadata.
-      2198,
+      2199,
       env,
     ),
     publicDeprecatedExports: readPluginSdkSurfaceBudgetEnv(
