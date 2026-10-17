@@ -129,7 +129,6 @@ extensions/codex/src/app-server/native-skill-isolation.ts	1
 extensions/codex/src/app-server/plugin-activation.ts	1
 extensions/codex/src/app-server/plugin-inventory.ts	6
 extensions/codex/src/app-server/plugin-metadata-cache.ts	5
-extensions/codex/src/app-server/run-attempt-context.ts	2
 extensions/codex/src/app-server/run-attempt-resources.ts	12
 extensions/codex/src/app-server/run-attempt-runtime.ts	1
 extensions/codex/src/app-server/run-attempt-server-requests.ts	2
@@ -144,7 +143,6 @@ extensions/codex/src/app-server/thread-lifecycle-run.ts	1
 extensions/codex/src/app-server/tool-abort-terminal-reason.ts	1
 extensions/codex/src/app-server/transcript-mirror.ts	1
 extensions/codex/src/app-server/transport-stdio.ts	1
-extensions/codex/src/command-handlers.ts	2
 extensions/codex/src/command-rpc.ts	1
 extensions/codex/src/conversation-control.ts	1
 extensions/codex/src/migration/apply.ts	2
@@ -330,7 +328,7 @@ extensions/file-transfer/src/tools/file-fetch-tool.ts	1
 extensions/file-transfer/src/tools/file-write-tool.ts	1
 extensions/firecrawl/index.ts	2
 extensions/firecrawl/src/config.ts	3
-extensions/firecrawl/src/firecrawl-fetch-provider-shared.ts	5
+extensions/firecrawl/src/firecrawl-fetch-provider-shared.ts	4
 extensions/github-copilot/embeddings.ts	3
 extensions/github-copilot/index.ts	3
 extensions/github-copilot/login.ts	2
@@ -508,7 +506,7 @@ extensions/memory-core/src/session-backfill.ts	1
 extensions/memory-core/src/session-ingestion.ts	2
 extensions/memory-core/src/session-reset-recall-metadata.ts	3
 extensions/memory-core/src/short-term-promotion-apply.ts	1
-extensions/memory-core/src/short-term-promotion-memory-write.ts	2
+extensions/memory-core/src/short-term-promotion-memory-write.ts	1
 extensions/memory-core/src/short-term-promotion-record.ts	1
 extensions/memory-core/src/short-term-promotion-rehydrate.ts	1
 extensions/memory-core/src/standing-intents-tool.ts	1
@@ -552,7 +550,6 @@ extensions/msteams/src/feedback-invoke.ts	2
 extensions/msteams/src/file-consent.ts	1
 extensions/msteams/src/graph.ts	2
 extensions/msteams/src/inbound.ts	1
-extensions/msteams/src/monitor-handler/inbound-dispatch.ts	1
 extensions/msteams/src/monitor-handler/inbound-facts.ts	1
 extensions/msteams/src/monitor.ts	5
 extensions/msteams/src/msteams-ingress.ts	1
@@ -1158,7 +1155,7 @@ src/agents/cli-runner/cli-run-transcript.ts	1
 src/agents/cli-runner/execute-node-claude.ts	5
 src/agents/cli-runner/execute.ts	2
 src/agents/cli-runner/prepare.ts	1
-src/agents/cli-runner/session-history.ts	3
+src/agents/cli-runner/session-history.ts	1
 src/agents/code-mode-runtime.ts	2
 src/agents/code-mode-script-syntax.ts	1
 src/agents/code-mode.ts	2
@@ -1247,7 +1244,7 @@ src/agents/embedded-agent-subscribe.handlers.messages.lifecycle.ts	1
 src/agents/embedded-agent-subscribe.handlers.messages.stream.ts	1
 src/agents/embedded-agent-subscribe.handlers.messages.update.ts	2
 src/agents/embedded-agent-subscribe.handlers.tools.results.ts	1
-src/agents/embedded-agent-subscribe.handlers.tools.start.ts	5
+src/agents/embedded-agent-subscribe.handlers.tools.start.ts	2
 src/agents/embedded-agent-subscribe.tool-text-diagnostics.ts	6
 src/agents/embedded-agent-tool-media.ts	5
 src/agents/embedded-agent-tool-results.ts	7
@@ -1263,7 +1260,6 @@ src/agents/harness/context-engine-lifecycle.ts	3
 src/agents/harness/context-engine-turn-outbox.ts	1
 src/agents/harness/gateway-question.ts	4
 src/agents/harness/hook-helpers.ts	1
-src/agents/harness/lifecycle-hook-helpers.ts	1
 src/agents/harness/native-hook-relay-client.ts	2
 src/agents/harness/native-hook-relay-codec.ts	2
 src/agents/harness/selection.ts	3
@@ -1333,7 +1329,6 @@ src/agents/session-transcript-repair.ts	2
 src/agents/sessions/agent-session-base.ts	3
 src/agents/sessions/agent-session-models.ts	1
 src/agents/sessions/agent-session-tree.ts	1
-src/agents/sessions/agent-session-utils.ts	1
 src/agents/sessions/auth-storage.ts	1
 src/agents/sessions/extensions/loader.ts	2
 src/agents/sessions/extensions/runner.ts	14
@@ -1658,7 +1653,7 @@ src/commands/doctor-session-canonical-keys.ts	1
 src/commands/doctor-session-incognito-key-repair-state.ts	4
 src/commands/doctor-session-snapshots.ts	3
 src/commands/doctor-session-sqlite-recover-report.ts	1
-src/commands/doctor-session-transcript-headers.ts	4
+src/commands/doctor-session-transcript-headers.ts	2
 src/commands/doctor-session-transcript-labels.ts	1
 src/commands/doctor-session-transcripts.ts	1
 src/commands/doctor-skills.ts	1
@@ -1690,7 +1685,7 @@ src/commands/doctor/shared/open-policy-allowfrom.ts	1
 src/commands/doctor/shared/plugin-tool-allowlist-warnings.ts	1
 src/commands/doctor/shared/stale-agent-model-ref-repair.ts	2
 src/commands/doctor/shared/stale-auth-order-store.ts	2
-src/commands/doctor/shared/stale-auth-order.ts	4
+src/commands/doctor/shared/stale-auth-order.ts	3
 src/commands/gateway-health-auth-diagnostic.ts	1
 src/commands/gateway-presence.ts	1
 src/commands/gateway-status/helpers.ts	11
@@ -1933,7 +1928,6 @@ src/gateway/server-plugins-node-runtime.ts	1
 src/gateway/server-plugins.ts	2
 src/gateway/server-reload-restart.ts	2
 src/gateway/server-reload-utils.ts	1
-src/gateway/server-restart-sentinel-agent-delivery.ts	2
 src/gateway/server-runtime-state-prepare.ts	1
 src/gateway/server-startup-config-helpers.ts	1
 src/gateway/server-startup-post-attach.ts	1
@@ -1986,7 +1980,6 @@ src/hooks/internal-hook-types.ts	2
 src/hooks/loader.ts	1
 src/hooks/message-hook-mappers.ts	2
 src/hooks/module-loader.ts	1
-src/hooks/policy.ts	1
 src/infra/advertised-lan-host.ts	1
 src/infra/agent-event-lifecycle.ts	1
 src/infra/agent-events.ts	2
@@ -2192,7 +2185,7 @@ src/node-host/invoke-agent-cli-claude-params.ts	1
 src/node-host/invoke-agent-cli-claude.ts	1
 src/node-host/invoke-payload.ts	3
 src/node-host/invoke.ts	1
-src/node-host/mcp.ts	2
+src/node-host/mcp.ts	1
 src/node-host/node-worker-transfer-client.ts	1
 src/node-host/node-worker-transfer-http.ts	1
 src/node-host/node-worker-tree-control.ts	2
@@ -2277,7 +2270,7 @@ src/plugins/hook-decision-types.ts	1
 src/plugins/hook-isolation.ts	3
 src/plugins/hook-runner-global-state.ts	1
 src/plugins/hook-types.ts	2
-src/plugins/hooks.ts	8
+src/plugins/hooks.ts	7
 src/plugins/host-hook-attachments.ts	1
 src/plugins/host-hook-runtime.ts	1
 src/plugins/host-hook-scheduled-turns.ts	4
@@ -2312,7 +2305,6 @@ src/plugins/native-module-require.ts	2
 src/plugins/official-external-provider-endpoints.ts	1
 src/plugins/openai-compatible-embedding-provider.ts	1
 src/plugins/plugin-command-dispatch-contract.ts	1
-src/plugins/plugin-command-execution.ts	1
 src/plugins/plugin-command-runtime.ts	1
 src/plugins/plugin-metadata-snapshot.runtime.ts	2
 src/plugins/plugin-package-update.ts	1
@@ -2433,7 +2425,7 @@ src/skills/runtime/remote-probe-utils.ts	2
 src/skills/runtime/remote-skills.ts	1
 src/skills/workshop/tool-policy-diagnostic.ts	1
 src/snapshot/git-backup-codec.ts	7
-src/snapshot/local-repository.ts	4
+src/snapshot/local-repository.ts	3
 src/snapshot/manifest.ts	1
 src/state/openclaw-agent-db-permissions.ts	1
 src/state/openclaw-agent-db-registry-listing.ts	2
@@ -2472,7 +2464,7 @@ src/tts/tts-config.ts	4
 src/tts/tts-core.ts	1
 src/tts/tts-provider-resolution.ts	1
 src/tts/tts-request.ts	1
-src/tts/tts-settings.ts	3
+src/tts/tts-settings.ts	2
 src/tts/tts-telephony.ts	1
 src/tts/voice-models.ts	3
 src/tui/components/chat-log.ts	1
@@ -2511,7 +2503,7 @@ src/wizard/setup.plugin-config.ts	4
 src/wizard/setup.post-install-migration.ts	1
 src/wizard/setup.shared.ts	1
 src/wizard/setup.ts	1
-src/worker/inference-stream.runtime.ts	2
+src/worker/inference-stream.runtime.ts	1
 src/worker/launch-descriptor.ts	1
 src/worker/node-workspace-protocol.ts	1
 src/worker/worker-connection-frames.ts	2
@@ -2551,7 +2543,7 @@ ui/src/components/markdown-assistant-transcript.ts	1
 ui/src/components/markdown-code-blocks.ts	1
 ui/src/components/markdown-parser.ts	1
 ui/src/components/mcp-app-theme.ts	1
-ui/src/components/session-data-controller.ts	1
+ui/src/components/session-data.ts	1
 ui/src/components/session-organizer-controller.ts	5
 ui/src/components/terminal/terminal-connection.ts	2
 ui/src/components/terminal/terminal-controller-lifecycle.ts	1
@@ -2573,12 +2565,11 @@ ui/src/lib/config-form-utils.ts	1
 ui/src/lib/config/config-draft-model.ts	2
 ui/src/lib/keyboard-shortcuts.ts	1
 ui/src/lib/nodes/index.ts	2
-ui/src/lib/nodes/inventory.ts	1
 ui/src/lib/session-pull-requests.ts	2
 ui/src/lib/sessions/custom-groups.ts	5
 ui/src/lib/sessions/grouping.ts	4
 ui/src/lib/sessions/index.ts	1
-ui/src/lib/sessions/session-key.ts	4
+ui/src/lib/sessions/session-key.ts	3
 ui/src/lib/subscriptions-controller.ts	1
 ui/src/local-storage.ts	2
 ui/src/main.ts	1
@@ -2615,6 +2606,5 @@ ui/src/pages/config/settings-search.ts	1
 ui/src/pages/config/view-diff.ts	2
 ui/src/pages/custodian/session-lifecycle.ts	1
 ui/src/pages/labs/labs-registry.ts	4
-ui/src/pages/new-session/draft-place-browser.ts	1
 ui/src/pages/new-session/preferences.ts	1
 ui/src/pages/portals/portal-reachability.ts	1

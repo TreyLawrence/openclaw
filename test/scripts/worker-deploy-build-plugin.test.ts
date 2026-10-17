@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 import { encodePngRgba } from "rastermill";
 import * as tar from "tar";
 import { build } from "tsdown";
@@ -12,6 +13,7 @@ import { WebSocketServer } from "ws";
 import { rawDataToString } from "../../packages/gateway-client/src/websocket-data.js";
 import {
   createWorkerDeployBuildPlugin,
+  resolveWorkerDeployGeneratorInputs,
   WORKER_DEPLOY_OPTIONAL_NATIVE_MODULE_ID,
 } from "../../scripts/lib/worker-deploy-build-plugin.mts";
 import { createWorkerBundleProducer } from "../../src/gateway/worker-environments/bundle.js";
@@ -41,6 +43,35 @@ const fail = (message: string): never => {
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 describe("worker deploy build plugin", () => {
+  it("embeds the pinned fs-safe manifest without requiring its installed package at runtime", () => {
+    const manifestPath = fs.realpathSync(
+      path.resolve("node_modules/@openclaw/fs-safe/package.json"),
+    );
+    const nativePath = fs.realpathSync(path.join(path.dirname(manifestPath), "dist/native.js"));
+    const plugin = createWorkerDeployBuildPlugin();
+    const code = 'const manifest = require("../package.json"); manifest.optionalDependencies;';
+    const transformed = plugin.transform.call({ error: fail }, code, nativePath);
+    expect(transformed).not.toBeNull();
+    expect(runInNewContext(transformed!)).toEqual(
+      JSON.parse(fs.readFileSync(manifestPath, "utf8")).optionalDependencies,
+    );
+    expect(resolveWorkerDeployGeneratorInputs()).toContain(manifestPath);
+    // An identical lookup in another dependency still belongs to that dependency's owner.
+    expect(plugin.transform.call({ error: fail }, code, manifestPath)).toBeNull();
+  });
+
+  it.each(["", 'require("../package.json"); require("../package.json");'])(
+    "rejects changed fs-safe native manifest lookup shape %#",
+    (code) => {
+      const nativePath = fs.realpathSync(
+        path.resolve("node_modules/@openclaw/fs-safe/dist/native.js"),
+      );
+      expect(() =>
+        createWorkerDeployBuildPlugin().transform.call({ error: fail }, code, nativePath),
+      ).toThrow("fs-safe native manifest lookup changed");
+    },
+  );
+
   it.each(["escaped.mjs", "worker/runtime.wasm", "worker/unowned.exe"])(
     "rejects an unstaged emitted %s before publishing the worker graph",
     (fileName) => {
@@ -135,7 +166,8 @@ export { updateExecApprovals, readExecApprovalsSnapshot } from "../infra/exec-ap
 export { closeOpenClawStateDatabaseAsync } from "../state/openclaw-state-db.js";
 export { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 export { readStableSqliteFileGeneration } from "../infra/sqlite-file-generation.js";
-export { recordOpenClawDatabaseQuarantine, readOpenClawDatabaseQuarantineFailure } from "../state/openclaw-quarantine-store.js";
+export { readOpenClawDatabaseQuarantineFailure } from "../state/openclaw-quarantine-store.js";
+export { seedOpenClawDatabaseQuarantine } from "../state/openclaw-quarantine-store.test-support.js";
 export { readSecretStoreExecEnvironment } from "../secrets/store/secret-store.js";
 export { rejectUnsafeExecControlShellCommand } from "../infra/exec-control-command-guard.js";
 export { WebSocket } from "../../packages/gateway-client/src/websocket.js";
@@ -149,6 +181,7 @@ export { runDesktopWebSocketRuntimeProbe } from "../gateway/desktop/websocket-ru
 export { loadActivatedBundledPluginPublicSurfaceModuleSync, listImportedBundledPluginFacadeIds } from "../plugin-sdk/facade-runtime.js";
 export { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 export { getFsSafeNativeConfig } from "@openclaw/fs-safe/config";
+export { getNativeFallbackDiagnostic } from ${JSON.stringify(pathToFileURL(fs.realpathSync(path.resolve("node_modules/@openclaw/fs-safe/dist/native.js"))).href)};
 export { readOwnerAndDaclBatch } from "@openclaw/fs-safe/permissions";`;
               }
               if (id === highlightSource) {
@@ -244,7 +277,7 @@ const {
   closeOpenClawStateDatabaseAsync,
   resolveOpenClawStateSqlitePath,
   readStableSqliteFileGeneration,
-  recordOpenClawDatabaseQuarantine,
+  seedOpenClawDatabaseQuarantine,
   readOpenClawDatabaseQuarantineFailure,
 } = await import(pathToFileURL(entry).href);
 const match = { id: "portable-exec", pattern: process.execPath };
@@ -265,10 +298,10 @@ try {
   assert.ok(stored.lastUsedAt > 0);
   await closeOpenClawStateDatabaseAsync();
   const statePath = resolveOpenClawStateSqlitePath();
-  assert.equal(recordOpenClawDatabaseQuarantine({
+  seedOpenClawDatabaseQuarantine({
     kind: "state", path: statePath, reason: "portable integrity failure",
     generation: readStableSqliteFileGeneration(statePath),
-  }), true);
+  });
   assert.equal(readOpenClawDatabaseQuarantineFailure("state", statePath)?.name, "SqliteIntegrityError");
   await assert.rejects(
     updateExecApprovals({ update: { kind: "replace", file: { version: 1, defaults: { security: "deny", ask: "off" } } } }),
@@ -363,9 +396,16 @@ const {
   listImportedBundledPluginFacadeIds,
   setRuntimeConfigSnapshot,
   getFsSafeNativeConfig,
+  getNativeFallbackDiagnostic,
   readOwnerAndDaclBatch,
 } = await import(pathToFileURL(entry).href);
 assert.equal(getFsSafeNativeConfig().mode, "off", "sealed policy must override host native mode");
+const diagnostic = getNativeFallbackDiagnostic();
+assert.equal(diagnostic.reason, "disabled");
+if (diagnostic.packageName) {
+  const versions = ${JSON.stringify(JSON.parse(fs.readFileSync(path.resolve("node_modules/@openclaw/fs-safe/package.json"), "utf8")).optionalDependencies)};
+  assert.equal(diagnostic.packageVersion, versions[diagnostic.packageName]);
+}
 assert.deepEqual(await readOwnerAndDaclBatch([]), []);
 if (process.platform !== "win32") {
   assert.deepEqual(await readOwnerAndDaclBatch([entry]), [{
@@ -805,7 +845,12 @@ export async function createAttachedBrowserToolRuntime(params) {
 
     const transformed = plugin.transform.call({ error: fail }, source, nativePath);
 
-    expect(transformed).toBeNull();
+    const { optionalDependencies } = JSON.parse(
+      fs.readFileSync(path.resolve("node_modules/@openclaw/fs-safe/package.json"), "utf8"),
+    );
+    expect(transformed).toBe(
+      source.replace('require("../package.json")', JSON.stringify({ optionalDependencies })),
+    );
   });
 
   it.each<{

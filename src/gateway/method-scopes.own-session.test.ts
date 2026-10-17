@@ -44,6 +44,22 @@ afterEach(() => {
 });
 
 describe("method scope resolution and authorization", () => {
+  it("admits workspace refresh and metadata edits while retaining full-write admission for lifecycle actions", () => {
+    for (const action of ["refresh_base", "edit"]) {
+      expect(
+        authorizeOperatorScopesForMethod("sessions.github.action", ["operator.sessions.write"], {
+          action,
+        }),
+      ).toEqual({ allowed: true });
+    }
+    for (const action of ["inspect", "ready", "merge", "close", "unknown"]) {
+      expect(
+        authorizeOperatorScopesForMethod("sessions.github.action", ["operator.sessions.write"], {
+          action,
+        }),
+      ).toEqual({ allowed: false, missingScope: "operator.write" });
+    }
+  });
   it("keeps private background mutations under ordinary write scope", () => {
     expect(resolveLeastPrivilegeOperatorScopesForMethod("users.background.get")).toEqual([
       "operator.read",
