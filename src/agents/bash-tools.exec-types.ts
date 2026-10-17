@@ -19,6 +19,7 @@ import type { SafeBinProfileFixture } from "../infra/exec-safe-bin-policy.js";
 import type { PluginHookChannelContext } from "../plugins/hook-types.js";
 import type { TerminationReason } from "../process/supervisor/types.js";
 import type { SecretStoreExecEnvironment } from "../secrets/store/secret-store.js";
+import type { ToolApprovalReview } from "../shared/tool-approval-reviews.js";
 import type { OperationalRunInstanceRef } from "./admitted-run-context.js";
 import type { BashSandboxConfig } from "./bash-tools.shared.js";
 import type { EmbeddedFullAccessBlockedReason } from "./embedded-agent-runner/types.js";
@@ -92,6 +93,8 @@ export type ExecToolDefaults = {
   /** Reads current attempt context only when a command needs review. */
   reviewTranscript?: () => ExecAutoReviewTranscript | undefined;
   agentId?: string;
+  /** Credential owner when execution borrows another agent's tool policy. */
+  executionAgentId?: string;
   backgroundMs?: number;
   cleanupMs?: number;
   timeoutSec?: number;
@@ -215,13 +218,7 @@ export type ExecElevatedDefaults = {
 };
 
 /** One model-backed approval review recorded on an exec tool call. */
-export type ExecToolApprovalReview = {
-  id: string;
-  label: string;
-  status: "in_progress" | "approved" | "denied" | "timed_out" | "aborted";
-  riskLevel?: string;
-  rationale?: string;
-};
+export type ExecToolApprovalReview = Omit<ToolApprovalReview, "userAuthorization">;
 
 /** Structured details returned by exec tool calls. */
 export type ExecToolDetails = {

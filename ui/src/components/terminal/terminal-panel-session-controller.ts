@@ -12,7 +12,10 @@ import {
 } from "./terminal-connection.ts";
 import { disposeTerminalController } from "./terminal-controller-lifecycle.ts";
 import { terminalOpenErrorText } from "./terminal-panel-chrome.ts";
-import { bootTerminalPanelSession } from "./terminal-panel-session-boot.ts";
+import {
+  bootTerminalPanelSession,
+  observeTerminalRestoreInput,
+} from "./terminal-panel-session-boot.ts";
 import { focusTerminalSession } from "./terminal-panel-session-rendering.ts";
 import {
   resolveTerminalPanelOwnerSessionKey,
@@ -23,6 +26,7 @@ import {
   type TerminalPanelSessionControllerHost,
   type TerminalPanelSessionControllerState,
   type TerminalPanelSessionTab,
+  type TerminalRestoreBatch,
 } from "./terminal-panel-session-types.ts";
 import { TerminalIntentQueue, terminalIntentQueue } from "./terminal-pending-actions.ts";
 import type { TerminalIntentHost } from "./terminal-pending-actions.ts";
@@ -32,13 +36,6 @@ import {
 } from "./terminal-session-storage.ts";
 import { TerminalTabReadinessController } from "./terminal-tab-readiness.ts";
 import { TerminalTaskQueue } from "./terminal-task-queue.ts";
-
-type TerminalRestoreBatch = {
-  operation: TerminalOperation;
-  pending: Map<string, TerminalPanelSessionTab | undefined>;
-  userClosedTab: boolean;
-  cancelIntent?: () => void;
-};
 
 /** Owns gateway PTY sessions and the Ghostty controllers bound to them. */
 export class TerminalPanelSessionController implements TerminalPanelSessionControllerState {
@@ -100,7 +97,7 @@ export class TerminalPanelSessionController implements TerminalPanelSessionContr
         return this.intentHost.canRun();
       },
       hasTabs: () => this.tabs.length > 0,
-      requestUpdate: () => this.host.requestUpdate(),
+      requestUpdate: () => this.host.invalidate(),
       setBooting: (booting) => this.updateControllerState({ booting }),
       timeoutMs: () => this.host.catalogReadyTimeoutMs,
       showTimeout: () => {
@@ -132,7 +129,7 @@ export class TerminalPanelSessionController implements TerminalPanelSessionContr
 
   private updateControllerState(state: Partial<TerminalPanelSessionControllerState>): void {
     Object.assign(this, state);
-    this.host.requestUpdate();
+    this.host.invalidate();
   }
 
   setError(text: string | null, retryAction?: TerminalPanelOpenAction): TerminalPanelError | null {
@@ -276,6 +273,7 @@ export class TerminalPanelSessionController implements TerminalPanelSessionContr
       operation,
       pending: new Map(persisted.map((sessionId) => [sessionId, undefined])),
       userClosedTab: false,
+      input: observeTerminalRestoreInput(this.host.ownerDocument, operation.signal),
       cancelIntent,
     };
     this.pendingRestore = restore;
@@ -307,6 +305,7 @@ export class TerminalPanelSessionController implements TerminalPanelSessionContr
     } catch {
       // A failed restore falls through to a fresh session below.
     } finally {
+      restore.input.stop();
       if (this.isTerminalOperationCurrent(operation, restore)) {
         this.pendingRestore = null;
         this.updateControllerState({ booting: false });
@@ -373,12 +372,14 @@ export class TerminalPanelSessionController implements TerminalPanelSessionContr
       restore?: { batch: TerminalRestoreBatch; sessionId: string };
     } = {},
   ) {
+    const restore = options.restore?.batch;
     const boot = await bootTerminalPanelSession({
       panel: this.host,
       connection: this.connectionFor(operation),
       sequence: ++this.tabSequence,
       awaitFirstOutput: options.awaitFirstOutput === true,
-      isCurrent: () => this.isTerminalOperationCurrent(operation, options.restore?.batch),
+      isCurrent: () => this.isTerminalOperationCurrent(operation, restore),
+      shouldFocusOnOpen: restore && (() => !restore.input.interacted),
       onReady: (tab) => this.readiness.markReady(tab),
       onExit: (tab, info) => this.handleExit(tab.id, info),
     });
@@ -390,7 +391,8 @@ export class TerminalPanelSessionController implements TerminalPanelSessionContr
     // without making an unadopted gatewaySessionId usable by input or resize.
     options.restore?.batch.pending.set(options.restore.sessionId, boot.tab);
     boot.tab.cancelPendingIntent = operation.cancelIntent;
-    this.updateControllerState({ tabs: [...this.tabs, boot.tab], activeId: boot.tab.id });
+    const activeId = restore?.input.interacted ? (this.activeId ?? boot.tab.id) : boot.tab.id;
+    this.updateControllerState({ tabs: [...this.tabs, boot.tab], activeId });
     return boot;
   }
 

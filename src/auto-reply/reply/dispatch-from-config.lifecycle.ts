@@ -135,7 +135,6 @@ async function restoreArchivedDispatchSession(params: {
       const currentEntry = metadata
         ? metadata.readCurrent()
         : await readSessionEntryReadOnlyInWorker(scope);
-      metadata?.assertCurrent();
       if (
         !currentEntry ||
         !canRestore(currentEntry, {
@@ -511,8 +510,8 @@ export function createDispatchReplyOperationCoordinator(params: {
             routeThreadId: params.routeThreadId,
           }))
       ) {
-        // A low-level successor retains its own cancellation while it waits for queue admission.
-        if (allowActiveResolution && !params.allowActiveQueueResolution) {
+        // Gateway and low-level successors retain their own cancellation while awaiting queue admission.
+        if (allowActiveResolution && !allowGatewayQueueResolution) {
           preDispatchAbortOperation = admission.activeOperation;
         }
         preDispatchLifecycleAdmission = admission.lifecycleAdmission;
@@ -522,11 +521,6 @@ export function createDispatchReplyOperationCoordinator(params: {
           dispatchLifecycleAbortController = lifecycleOnlyAbortController;
         }
         armPreDispatchLifecycleAbortRelease();
-        if (!allowActiveResolution) {
-          logVerbose(
-            `dispatch-from-config: allowing Slack routed thread ${params.routeThreadId} while ${dispatchOperationSessionKey} has an active reply operation in another Slack thread`,
-          );
-        }
         return { status: "ready" };
       }
       admission.lifecycleAdmission?.release();

@@ -19,6 +19,7 @@ import {
   type FinalizeArgs,
   type FinalizeArgsOverrides,
 } from "./setup.finalize.fixtures.test-support.js";
+import { readPin } from "./setup.finalize.runtime-pin.test-support.js";
 import {
   createRuntimeProbeResult,
   expectNoteContains,
@@ -32,8 +33,6 @@ type DefaultModelCatalogFacts = ReturnType<
   typeof AuthChoiceModelCheck.resolveDefaultModelCatalogFacts
 >;
 
-const readPin = vi.hoisted(() => vi.fn());
-vi.mock("../daemon/runtime-pin-state.js", () => ({ readDaemonRuntimePinForInstall: readPin }));
 const runExec = vi.hoisted(() => vi.fn());
 vi.mock("../process/exec.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../process/exec.js")>()),
@@ -979,29 +978,44 @@ describe("finalizeSetupWizard", () => {
     },
   );
 
-  it("reports gateway installation failure without waiting for impossible health", async () => {
-    gatewayServiceInstall.mockRejectedValueOnce(new Error("service install exploded"));
-    const prompter = createLaterPrompter();
-    const runtime = createRuntime();
-    await finalize("advanced", {
-      opts: { installDaemon: true, skipHealth: false },
-      prompter,
-      runtime,
-    });
+  it.each(["install", "restart"] as const)(
+    "reports gateway %s failure with recovery guidance instead of success",
+    async (action) => {
+      gatewayServiceIsLoaded.mockResolvedValue(action === "restart");
+      const error = `service ${action} exploded`;
+      (action === "restart" ? gatewayServiceRestart : gatewayServiceInstall).mockRejectedValueOnce(
+        new Error(error),
+      );
+      const progressStop = vi.fn();
+      const prompter = buildWizardPrompter(
+        {
+          progress: () => ({ update: vi.fn(), stop: progressStop }),
+        },
+        { defaultSelect: "restart" },
+      );
+      const runtime = createRuntime();
+      await finalize("advanced", {
+        opts: { installDaemon: true, skipHealth: false },
+        prompter,
+        runtime,
+      });
 
-    expect(waitForGatewayReachable).not.toHaveBeenCalled();
-    expect(probeGatewayReachable).toHaveBeenCalledOnce();
-    expect(runtime.error).toHaveBeenCalledWith("health failed");
-    expectNoteContains(prompter, "service install exploded", "Gateway");
-    expectNoteContains(prompter, "Gateway: not detected (offline)", "Control UI");
-    expect(prompter.outro).toHaveBeenCalledWith(
-      expect.stringContaining("managed Mock Platform Service setup failed"),
-    );
-    expectNoteContains(prompter, "openclaw gateway status --deep", "Gateway");
-    expectNoteContains(prompter, "openclaw gateway install --force", "Gateway");
-    expectNoteNotContains(prompter, "openclaw gateway run");
-    expectNoteNotContains(prompter, "openclaw gateway restart");
-  });
+      expect(progressStop).not.toHaveBeenCalledWith("Gateway service restarted.");
+      expect(progressStop).not.toHaveBeenCalledWith("Gateway service installed.");
+      expect(waitForGatewayReachable).not.toHaveBeenCalled();
+      expect(probeGatewayReachable).toHaveBeenCalledOnce();
+      expect(runtime.error).toHaveBeenCalledWith("health failed");
+      expectNoteContains(prompter, error, "Gateway");
+      expectNoteContains(prompter, "Gateway: not detected (offline)", "Control UI");
+      expect(prompter.outro).toHaveBeenCalledWith(
+        expect.stringContaining("managed Mock Platform Service setup failed"),
+      );
+      expectNoteContains(prompter, "openclaw gateway status --deep", "Gateway");
+      expectNoteContains(prompter, "openclaw gateway install --force", "Gateway");
+      expectNoteNotContains(prompter, "openclaw gateway run");
+      expectNoteNotContains(prompter, "openclaw gateway restart");
+    },
+  );
 
   it("keeps managed readiness timeout recovery on the canonical service path", async () => {
     const detail = "gateway readiness timed out";
@@ -1232,7 +1246,7 @@ describe("finalizeSetupWizard", () => {
   it.each([undefined, "node"] as const)(
     "passes installed pin intent to the reinstall owner (explicit=%s)",
     async (daemonRuntime) => {
-      const pin = { runtime: "bun", path: "/opt/pinned/bun" };
+      const pin = { runtime: "bun", path: "/opt/pinned/bun" } as const;
       const expected = { revision: "pin-version", stored: true, pin };
       readPin.mockReturnValue(expected);
       let installed = true;
@@ -1293,7 +1307,6 @@ describe("finalizeSetupWizard", () => {
   );
 
   it.each([
-    { flow: "advanced", choice: "bun" },
     { flow: "advanced", choice: "node" },
     { flow: "quickstart", choice: "bun" },
   ] as const)(

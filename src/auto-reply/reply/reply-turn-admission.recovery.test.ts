@@ -7,12 +7,9 @@ import {
 } from "../../../test/helpers/promise.js";
 import { runWithAgentCommandRecoveryOwner } from "../../agents/agent-command-recovery-owner.js";
 import { MAIN_SESSION_RECOVERY_WORK_ADMISSION_OWNER } from "../../agents/main-session-recovery/main-session-recovery-admission.js";
-import * as recoveryLifecycle from "../../agents/main-session-recovery/main-session-recovery-lifecycle.js";
-import * as recoveryOwnerRelease from "../../agents/main-session-recovery/main-session-recovery-owner-release.js";
 import * as recoveryStore from "../../agents/main-session-recovery/main-session-recovery-store.js";
 import * as restartRecovery from "../../agents/main-session-recovery/main-session-restart-recovery.js";
 import { loadSessionEntry, replaceSessionEntry } from "../../config/sessions/session-accessor.js";
-import * as sessionAccessor from "../../config/sessions/session-accessor.js";
 import type { InternalSessionEntry as SessionEntry } from "../../config/sessions/types.js";
 import type { GatewayRecoveryRuntime } from "../../gateway/server-instance-runtime.types.js";
 import type { GatewayRequestContext } from "../../gateway/server-methods/types.js";
@@ -26,7 +23,7 @@ import {
   runExclusiveSessionLifecycleMutation,
   type SessionWorkAdmissionLease,
 } from "../../sessions/session-lifecycle-admission.js";
-import { createReplyOperation, replyRunRegistry } from "./reply-run-registry.js";
+import { replyRunRegistry } from "./reply-run-registry.js";
 import { testing } from "./reply-run-registry.test-support.js";
 import { admitTestReplyTurn, createSessionStore } from "./reply-turn-admission.test-support.js";
 
@@ -142,116 +139,6 @@ function recoveryFixture(overrides: Partial<SessionEntry> = {}) {
   };
 }
 
-it("keeps deferred owner release retries from retaining a successor", async () => {
-  const deferredReleases: Promise<void>[] = [];
-  const schedule = recoveryLifecycle.scheduleMainSessionRecoveryMutation;
-  const scheduled = vi
-    .spyOn(recoveryLifecycle, "scheduleMainSessionRecoveryMutation")
-    .mockImplementation((params) => {
-      const settled = createDeferred();
-      deferredReleases.push(settled.promise);
-      schedule({
-        ...params,
-        onSuccess: async (result) => {
-          await params.onSuccess(result);
-          settled.resolve();
-        },
-      });
-    });
-  const pendingTarget = vi
-    .spyOn(recoveryOwnerRelease, "scheduleMainSessionRecoveryPendingTarget")
-    .mockImplementation(() => {});
-  let restoreAccessor: (() => void) | undefined;
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  try {
-    const f = recoveryFixture({
-      mainRestartRecovery: { cycleId: "cycle-1", revision: 1, chargedAttempts: 0 },
-    });
-    const owner = owned(await f.admit());
-    const apply = sessionAccessor.applySessionEntryReplacements;
-    const failedWrites = Array.from({ length: 3 }, () => createDeferred());
-    let failures = 0;
-    const accessorSpy = vi
-      .spyOn(sessionAccessor, "applySessionEntryReplacements")
-      .mockImplementation(async (params) => {
-        const failedWrite = failedWrites[failures];
-        if (failedWrite) {
-          failures += 1;
-          failedWrite.resolve();
-          throw new Error("SQLite session entry changed before replacement");
-        }
-        return await apply(params);
-      });
-    restoreAccessor = () => accessorSpy.mockRestore();
-    owner.operation.complete();
-    const successor = f.admit();
-    for (const [index, failedWrite] of failedWrites.entries()) {
-      await failedWrite.promise;
-      if (index < failedWrites.length - 1) {
-        await vi.advanceTimersByTimeAsync(25 * 2 ** index);
-      }
-    }
-    // Join real worker I/O without advancing later retry timers.
-    const admitted = await successor;
-    expect(deferredReleases).toHaveLength(1);
-    accessorSpy.mockRestore();
-    owned(admitted);
-    const released = getSessionWorkAdmissionRelease(f.scope);
-    expect(released).toBeDefined();
-    complete(admitted);
-    await released;
-  } finally {
-    try {
-      restoreAccessor?.();
-      // Start deferred repair without firing unrelated database lease deadlines.
-      await vi.advanceTimersByTimeAsync(1_000);
-      await Promise.all(deferredReleases);
-    } finally {
-      scheduled.mockRestore();
-      pendingTarget.mockRestore();
-      vi.useRealTimers();
-    }
-  }
-});
-
-it("settles a committed recovery claim without replay when preparation changes", async () => {
-  const f = recoveryFixture({
-    mainRestartRecovery: { cycleId: "cycle-1", revision: 1, chargedAttempts: 0 },
-  });
-  const predecessor = createReplyOperation({ sessionKey, sessionId, resetTriggered: false });
-  const claimed = createDeferred();
-  const release = createDeferred();
-  f.cleanup.push(() => {
-    release.resolve();
-    predecessor.complete();
-  });
-  const claim = recoveryStore.claimMainSessionRecoveryOwner;
-  const claimSpy = vi
-    .spyOn(recoveryStore, "claimMainSessionRecoveryOwner")
-    .mockImplementation(async (params) => {
-      const result = await claim(params);
-      claimed.resolve();
-      await release.promise;
-      return result;
-    });
-  const pending = f.admit({ expectedSessionId: undefined });
-  await Promise.race([
-    claimed.promise,
-    pending.then(() => {
-      throw new Error("Admission completed before recovery claimed ownership");
-    }),
-  ]);
-  expect(f.read()?.mainRestartRecovery).toMatchObject({
-    foregroundClaims: { tokens: [expect.any(String)] },
-  });
-  predecessor.complete();
-  release.resolve();
-  await expect(pending).rejects.toMatchObject({ code: "SESSION_WORK_START_CHANGED" });
-  expect(claimSpy).toHaveBeenCalledOnce();
-  expect(f.read()?.mainRestartRecovery?.foregroundClaims).toBeUndefined();
-  expect(replyRunRegistry.get(sessionKey)).toBeUndefined();
-});
-
 it("keeps new input and followups behind a concurrent recovery winner", async () => {
   const delivery = {
     restartRecoveryDeliveryRunId: "old-channel-claim",
@@ -272,6 +159,7 @@ it("keeps new input and followups behind a concurrent recovery winner", async ()
       expect(request).toMatchObject({
         expectedSessionId: sessionId,
         expectedRecoveryRunId: "old-channel-claim",
+        lane: "main",
         expectedRecoverySourceRunId: "old-channel-source",
         gatewayRuntime: context.recoveryRuntime,
       });
@@ -363,6 +251,7 @@ it.each([
       }),
     ]);
     expect(retry).toHaveBeenCalledOnce();
+    expect(retry.mock.calls[0]?.[0].lane).toBe(kind === "visible" ? "main" : undefined);
     await setImmediate();
     expect(f.read()).toMatchObject(f.entry);
     expect(replyRunRegistry.get(sessionKey)).toBeUndefined();

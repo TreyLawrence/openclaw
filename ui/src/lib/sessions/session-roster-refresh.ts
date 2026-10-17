@@ -208,7 +208,7 @@ export function createSessionRosterRefresh(host: SessionRosterRefreshHost) {
       result = host.reconcileList(result, issuedRevision, requestOptions.agentId);
       const currentState = host.readState();
       const mergeWithCurrent =
-        !currentState.resultCached && append && typeof requestOptions.offset === "number";
+        !currentState.resultCached && append && requestOptions.offset !== undefined;
       const currentResult = currentState.resultCached ? null : currentState.result;
       const observed = observations.accept(result, currentState, null, requestOptions.agentId);
       let nextResult =
@@ -480,6 +480,7 @@ export function createSessionRosterRefresh(host: SessionRosterRefreshHost) {
       return;
     }
     if (!queuedRefresh) {
+      eventRefreshCoordinator.absorb();
       await startRefresh({ ...lastListOptions, force: true });
     }
   };
@@ -704,7 +705,6 @@ export function createSessionRosterRefresh(host: SessionRosterRefreshHost) {
         entry.startupRetryAttempt = 0;
         entry.pending = entry.queued = null;
         if (entry.listeners.size === 0) {
-          entry.coordinator.dispose();
           managedLists.delete(entry.key);
           continue;
         }

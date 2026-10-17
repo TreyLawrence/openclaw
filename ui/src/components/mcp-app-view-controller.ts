@@ -12,7 +12,7 @@ import { t as translate } from "../i18n/index.ts";
 import { registerMcpAppEnglish } from "../i18n/locales/en-mcp-app.ts";
 import { parseMcpAppLink } from "../lib/mcp-app-route.ts";
 import { openExternalUrlSafe } from "../lib/open-external-url.ts";
-import type { SolidBridgeElement } from "../lit/solid-bridge.ts";
+import type { SolidBridgeElement } from "../lib/solid-bridge.ts";
 import { OpenClawAppBridge, bindMcpAppResourceHandlers } from "./mcp-app-bridge.ts";
 import { McpAppConfirm } from "./mcp-app-confirm.ts";
 import {
@@ -365,18 +365,17 @@ export class McpAppViewController {
     signal: AbortSignal,
   ) {
     bridge.onopenlink = async ({ url }) => {
-      if (!parseMcpAppLink(url)) {
-        return openExternalUrlSafe(url) ? {} : { isError: true };
-      }
       const context = this.context;
-      // Recognized plugin links navigate this host, so a retired/background frame
-      // must not redirect a collaborator or a replacement connection.
+      // Both external and plugin navigation require the current, focused App.
       if (
         !context ||
         !this.isCurrentBinding(binding, resources, signal) ||
         !isWidgetFrameInteractable(resources.iframe)
       ) {
         return { isError: true };
+      }
+      if (!parseMcpAppLink(url)) {
+        return openExternalUrlSafe(url) ? {} : { isError: true };
       }
       return navigateMcpAppLink(context, url) ? {} : { isError: true };
     };

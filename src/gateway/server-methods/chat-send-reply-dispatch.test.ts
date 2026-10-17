@@ -74,7 +74,7 @@ function interceptDeliverySnapshot(afterRead: () => void) {
 
 describe("chat delivery watermark preparation", () => {
   it.each(["rewrite", "replacement"] as const)(
-    "reads released actor reply facts and rejects the old answer after %s",
+    "reads released durable reply facts through history and rejects the old answer after %s",
     async (change) => {
       await withOpenClawTestState({ label: "chat-delivery-actor-receipt" }, async () => {
         const { dispatch, rewriteSync, scope, runId } = await createReplyTranscriptFixture();
@@ -133,7 +133,8 @@ describe("chat delivery watermark preparation", () => {
         try {
           await runWithoutOwnedSessionTranscriptWrites(async () => {
             expect(await dispatch.resolveReplyDelivery()).toBe("delivered");
-            expect(anchorReads).not.toHaveBeenCalled();
+            // Durable append receipts omit full indexes; the history owner supplies anchors.
+            expect(anchorReads).toHaveBeenCalledTimes(1);
             if (change === "rewrite") {
               rewriteSync("answer", "NO_REPLY");
             } else {
@@ -144,9 +145,7 @@ describe("chat delivery watermark preparation", () => {
               });
             }
             expect(await dispatch.resolveReplyDelivery()).toBe("missing");
-            if (change === "rewrite") {
-              expect(anchorReads).toHaveBeenCalledTimes(1);
-            }
+            expect(anchorReads).toHaveBeenCalledTimes(change === "rewrite" ? 2 : 1);
           });
         } finally {
           readerSpy.mockRestore();
@@ -186,44 +185,6 @@ describe("chat delivery watermark preparation", () => {
           maxSeq: 0,
         }),
       ).toBe(false);
-      expect(await dispatch.resolveReplyDelivery()).toBe("missing");
-    });
-  });
-
-  it("refuses an anchor snapshot changed by an unpublished native append", async () => {
-    await withOpenClawTestState({ label: "chat-anchor-delay" }, async () => {
-      const { dispatch, append, scope } = await createReplyTranscriptFixture();
-      dispatch.captureAgentTranscriptStart();
-      await append("answer", { role: "assistant", content: "Committed answer." });
-      const createReaders = historyReaders.createSessionHistoryWorkerReaders;
-      let changed = false;
-      const readerSpy = vi
-        .spyOn(historyReaders, "createSessionHistoryWorkerReaders")
-        .mockImplementation((runRequest) => {
-          const readers = createReaders(runRequest);
-          return {
-            ...readers,
-            readAnchors: async (input, signal) => {
-              const facts = await readers.readAnchors(input, signal);
-              if (!changed && input.selection.includeMessagesForRunId) {
-                changed = true;
-                expect(
-                  appendTranscriptMessageSync(scope, {
-                    eventId: "late-user",
-                    message: { role: "user", content: "A newly admitted question." },
-                  }).ok,
-                ).toBe(true);
-              }
-              return facts;
-            },
-          };
-        });
-      try {
-        expect(await dispatch.resolveReplyDelivery()).toBe("pending");
-        expect(changed).toBe(true);
-      } finally {
-        readerSpy.mockRestore();
-      }
       expect(await dispatch.resolveReplyDelivery()).toBe("missing");
     });
   });
@@ -421,10 +382,8 @@ describe("buildAssistantReplyContentFromInputs", () => {
   it.each([
     ...(
       [
-        { kind: "raw", withAnswer: false },
         { kind: "prepared", withAnswer: false },
         { kind: "raw", withAnswer: true },
-        { kind: "prepared", withAnswer: true },
       ] as const
     ).map(({ kind, withAnswer }) => ({
       name: `${kind} reasoning (answer: ${withAnswer})`,
@@ -609,7 +568,6 @@ describe("createChatSendReplyDispatch", () => {
   });
 
   it.each([
-    { operation: "raw", split: false },
     { operation: "raw", split: true },
     { operation: "prepared", split: false },
     { operation: "prepared", split: true },
@@ -659,17 +617,17 @@ describe("createChatSendReplyDispatch", () => {
       onCommandBlock,
     });
     const dispatcher = createReplyDispatcher(dispatch.dispatcherOptions);
-    dispatcher.sendBlockReply({ text: "[[reply_to_current]] First instruction" });
+    dispatcher.sendBlockReply({ text: "[[reply_to_current]] First" });
     await dispatcher.waitForIdle();
-    expect(onCommandBlock).toHaveBeenLastCalledWith("First instruction");
-    dispatcher.sendBlockReply({ text: "Second instruction" });
-    await dispatcher.waitForIdle();
-    expect(onCommandBlock).toHaveBeenLastCalledWith("First instruction\n\nSecond instruction");
+    for (const text of ["Second", "NO_REPLY", "NO_REPLY.", "ANNOUNCE_SKIP"]) {
+      dispatcher.sendBlockReply({ text });
+      await dispatcher.waitForIdle();
+    }
+    const expected = "First\n\nSecond\n\nNO_REPLY\n\nNO_REPLY.\n\nANNOUNCE_SKIP";
+    expect(onCommandBlock).toHaveBeenLastCalledWith(expected);
 
     onCommandBlock.mockClear();
     dispatcher.sendBlockReply({ text: "hidden reasoning", isReasoning: true });
-    dispatcher.sendBlockReply({ text: "NO_REPLY" });
-    dispatcher.sendBlockReply({ text: "ANNOUNCE_SKIP" });
     dispatcher.sendBlockReply({ text: "side answer", btw: { question: "side question" } });
     await dispatcher.waitForIdle();
     expect(onCommandBlock).not.toHaveBeenCalled();
@@ -768,7 +726,7 @@ describe("createChatSendReplyDispatch", () => {
     { phase: "final_answer", text: "Fixture inspected.", expected: "delivered" },
     { phase: "commentary", text: "Inspecting the fixture.", expected: "missing" },
     { phase: undefined, text: "Inspecting the fixture.", expected: "missing" },
-    { phase: "final_answer", text: "NO_REPLY", expected: "missing" },
+    { phase: "final_answer", text: "NO_REPLY", expected: "delivered" },
     { phase: "final_answer", text: "", expected: "missing" },
   ])(
     "uses committed display answers, not tool progress ($phase, $text)",

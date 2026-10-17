@@ -16,8 +16,12 @@ import {
   verifyAndRecordPostgresSchema,
   readPostgresSchema,
   verifyPostgresSchema,
+  withPostgresSearchExtensions,
 } from "./postgres-schema.js";
+import { bindStoreSearch } from "./search.js";
 import type { DatabaseEngineInput } from "./types.js";
+
+export { admitStoreSearch } from "./search-admission.js";
 
 function classifyError(error: unknown): DatabaseErrorKind {
   if (!(error instanceof Error)) {
@@ -40,8 +44,10 @@ function classifyError(error: unknown): DatabaseErrorKind {
 }
 
 export const databaseEngineAdapters: {
-  readonly sqlite: DatabaseEngineAdapter<DatabaseSync>;
-  readonly postgres: DatabaseEngineAdapter<PostgresSyncConnection>;
+  readonly sqlite: DatabaseEngineAdapter<DatabaseSync> & { search: typeof bindStoreSearch };
+  readonly postgres: DatabaseEngineAdapter<PostgresSyncConnection> & {
+    search: typeof bindStoreSearch;
+  };
 } = {
   sqlite: {
     id: "sqlite",
@@ -52,6 +58,7 @@ export const databaseEngineAdapters: {
       read: runSqliteDeferredTransactionSync,
     },
     capabilities: { fullText: "fts5", vector: "sqlite-vec" },
+    search: bindStoreSearch,
     schema: {
       // The store's existing SQLite schema/migration owner runs unchanged at open.
       bootstrap: (store) => store.openSqlite(),
@@ -97,12 +104,13 @@ export const databaseEngineAdapters: {
     kysely: getNodeSqliteKysely,
     transactions: { write: runSqliteImmediateTransactionSync, read: runSqliteReadSnapshotSync },
     capabilities: { fullText: "tsvector", vector: null },
+    search: bindStoreSearch,
     schema: {
       bootstrap: (store, db) => {
         if (!store.schema.postgres) {
           throw new Error("Store has no PostgreSQL schema");
         }
-        db.exec(postgresSchemaSql(store.schema));
+        db.exec(postgresSchemaSql(store.schema, store.namespace!));
         db.prepare(
           "INSERT INTO openclaw_schema_meta (store, version, store_id) VALUES (?, ?, ?)",
         ).run(store.schema.id, store.schema.version, store.storeId!);
@@ -122,16 +130,18 @@ export const databaseEngineAdapters: {
               `Missing PostgreSQL ${store.schema.id} migration to version ${version}; use a compatible binary or restore a matching backup.`,
             );
           }
+          const snapshot = readPostgresSchema(db, store.namespace!, store.schema.id);
+          const schema = withPostgresSearchExtensions(store.schema, snapshot);
           verifyPostgresSchema(
             db,
             store.namespace!,
             {
-              ...store.schema,
+              ...schema,
               version: version - 1,
               postgres: migration.fromSchema.postgres,
               postgresFragments: migration.fromSchema.postgresFragments,
             },
-            readPostgresSchema(db, store.namespace!, store.schema.id),
+            snapshot,
           );
           db.exec(migration.sql);
           db.prepare("UPDATE openclaw_schema_meta SET version = ? WHERE store = ?").run(
@@ -139,7 +149,7 @@ export const databaseEngineAdapters: {
             store.schema.id,
           );
           verifyAndRecordPostgresSchema(db, store.namespace!, {
-            ...store.schema,
+            ...schema,
             version,
             postgres: migration.schema.postgres,
             postgresFragments: migration.schema.postgresFragments,
