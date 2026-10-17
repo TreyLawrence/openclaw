@@ -151,6 +151,182 @@ on Linux, `OPENCLAW_LAUNCHD_LABEL=ai.openclaw.team-shape-40967` on macOS, or
 Use the corresponding suffix when changing ports. The generated config uses no authentication
 and is only suitable for isolated loopback repros.
 
+## Measure the post-restart reconnect burst
+
+Build runtime artifacts on the authorized benchmark host and generate a fresh
+offline team-shape fixture for each revision. Then run:
+
+```sh
+node --import ./scripts/tsx.mjs scripts/perf/post-restart-burst-measure.ts \
+  --state-dir /path/to/team-shape --clients 50 --runs 30 --seconds 300
+```
+
+The driver owns a loopback Gateway on port 41058 and a synthetic SSE model on
+41059; port collisions fail. It creates 30 shared sessions and starts real
+`agent` turns. Every uniquely marked primary model request remains held until
+all 30 arrive (a three-minute deadline). A primary response closing before the
+crash fails the run, and all 30 must still be actively held immediately before
+SIGKILL. The driver kills only its owned Gateway process group, drains all held
+response close callbacks, and restarts against the same synthetic state. After
+restart, model requests receive immediate short acknowledgements. Unique
+recovery arrivals are reported separately: startup may settle interrupted runs
+without a model replay. Utility calls never count as primary arrivals.
+
+The Gateway uses a fake fixture token. Clients use a non-ephemeral UI connection
+mode and sign the normal Gateway device challenge with generated Ed25519 keys.
+All clients pair through the normal loopback/shared-token admission before the
+crash in batches of 32, avoiding the per-IP preauth limit during setup. They
+reconnect concurrently with the same device keys after restart; admission refusals
+and retries remain part of the measurement. Connect verifies
+token authentication, retained read/admin scopes, and a durable owner profile through
+`users.self`, so `projects.list` exercises the signed-in session/recents phase.
+A generated catalog plugin consumes the real Gateway session metadata snapshot
+and returns up to 100 synthetic catalog rows; absent/empty catalog results fail.
+This measures catalog snapshot preparation, not real provider filesystem scans
+or remote discovery latency. All connections share one synthetic owner profile.
+
+As soon as the restarted Gateway becomes ready, 50 clients connect concurrently
+and request sidebar `sessions.list` rows (limit 100), `sessions.catalog.list`
+(limit 100 for the synthetic local host), and `projects.list` in parallel every five seconds. Each
+client waits for its batch before issuing another, bounding outstanding work.
+The measurement window starts at restart spawn; requests begun in its first
+five minutes are drained even if they finish later. Latency percentiles include
+successful replies only; errors, connection retries, and raw timings are retained
+so failed requests cannot disappear into the p99. `--seconds 900` extends ELU
+observation beyond five minutes without changing the first-five-minute summary.
+`--entry`, `--port`, `--mock-port`, and `--poll-ms` adjust execution and load.
+
+Results in `post-restart-burst-*/result.json` include readiness time, per-RPC p99,
+private Gateway main-thread ELU/CPU and loop-delay samples every five seconds,
+and time to three consecutive ELU samples below 0.8 after reconnect load begins
+(null if unobserved). Raw ELU includes startup; no inspector or profiling RPC is
+exposed. Unexpected child
+exit, incomplete initial arrivals, missing successful endpoint samples, or
+missing client/sample coverage fails the run. Owned children and the model
+server stop on completion or interruption. Teardown confirms each child has
+exited and its managed process group is dead; unresolved cleanup fails and is
+reported even when stopping a child throws. The model server always closes.
+Synthetic state and logs remain for
+inspection. This reproduces recovery and reconnect/list pressure, rather than
+production provider latency or arbitrary plugin load. Never point it at live
+state, and apply the sandbox rules below to every Team command.
+
+Add `--writer-reads --clients 150` to measure read traffic competing with startup
+writes. This enables the Prometheus plugin, makes each synthetic catalog request
+read its persisted plugin metadata, and adds `sessions.github.options` for an
+owned synthetic session plus `agents.list` to each client's polling batch. Agent
+listing exercises persisted provenance presentation reads. GitHub accounts remain
+disconnected; no external publication occurs. At five minutes from restart spawn
+(or the requested shorter duration), the driver saves `writer-metrics.prom` and
+includes writer queue wait sums/counts by request class in `result.json`. These
+are cumulative exporter observations since its startup, so work before exporter
+subscription is not covered. The `execute` class groups multiple unclassified
+commands; it does not identify an individual caller. Use the same driver options
+and fresh fixtures for both revisions.
+
+Add `--sqlite-queues --clients 50 --seconds 180` to capture every instrumented
+worker queue for the full first three minutes from restart spawn. Combine it
+with `--writer-reads` or `--cheap-handlers` to include those workloads. A private
+preload subscribes to the source diagnostic dispatcher before the built Gateway
+entrypoint starts; both use the same process-global dispatcher. It enables
+diagnostics before config loading, so capture does not depend on the Prometheus
+exporter's later subscription. Only the restarted main isolate is observed.
+
+`sqlite-queues.json` and `result.json.sqliteQueues` contain all worker kinds,
+per-kind and per-request-class counts, queue depth peaks, summed queued-time and
+service-occupancy integrals, completed service duration, observed queue-wait
+sums/maxima, and ten-second bins (at most 180 bins for longer runs). Classes are
+ranked by their queued-time contribution. `queueDepth` and `active` in the final
+rows count work still pending or running at the cutoff; their elapsed occupancy
+is included, even when they finish after the window. Cancellation before start
+is counted separately. Aggregates are bounded to 512 kind/class rows and retain
+only the first 2,000 metadata-only events as samples. No payloads, paths,
+session IDs or request values are retained. The existing native-task counter
+still covers only its original first-120-second window.
+
+The totals sum overlapping worker-kind queues, including SQLite reads and
+writes; they are **not one FIFO** and nested operations can occupy multiple
+kinds at once. A kind may itself combine several workers or database owners.
+`sharedSqlite` separately sums the `sqlite_writer`, `sqlite_read`, and `stateRead`
+transports named in `sharedSqliteKinds`; other database-using workers remain
+visible in the complete per-kind results rather than being guessed into this subset.
+Queued time identifies classes suffering waits, not which class blocked them.
+Compare service occupancy and request counts when investigating the blocker;
+service occupancy also includes transport and scheduling, not just SQLite CPU.
+`worktreeCommandDispatchCounts` splits the grouped `worktrees` class by a fixed
+allowlist of exact commands. This private probe decodes serialized dispatch
+inputs, including nested state-read commands, to count only command names; use
+it identically on both revisions.
+
+Events carry wall-clock emission timestamps, while `observedMs` records
+monotonic receipt time from restart spawn. Integrals and the cutoff use emission
+timestamps at millisecond resolution, avoiding asynchronous diagnostic-delivery
+lag; `maxDeliveryDelayMs` and `maxClockSkewMs` expose that limitation. The preload
+drains events already queued at the deadline before snapshotting, while excluding
+events emitted after it. `captureStartedMs` records the small process/loader gap
+before the listener is installed. Diagnostic drops, inconsistent depth accounting,
+row overflow, or clock skew of 100 ms or more mark the capture incomplete and
+fail the run after preserving its report. There are no request IDs or causal
+links, so this cannot prove individual request ordering across worker owners.
+Add `--writer-reads --worktree-churn --clients 40 --seconds 180` to compare
+worktree traffic after reconnect. The driver saves writer queue count/wait
+snapshots at 120 seconds, then creates 12 sessions with real worktrees in a
+seeded project concurrently, archives them, and deletes them through the normal
+RPCs. After archiving, it waits for the background cleanup receipt (including a
+coalesced follow-up pass) before sampling counters and deleting sessions. Each
+stage completes before the next and saves another metrics snapshot.
+`worktreeChurn` in `result.json` retains the snapshots and elapsed times; subtract
+adjacent counts/wait sums for each stage. Reconnect polling continues during the
+burst. Worktree creation or preserved cleanup failures reject the run. These
+histograms start when the exporter subscribes, so they exclude earlier boot
+work and describe all concurrent traffic, not just the 12 operations.
+
+Add `--cheap-handlers --clients 30 --seconds 120` to measure the first two minutes
+of reconnect traffic for `push.web.vapidPublicKey`, `push.web.subscribe`,
+`workboard.cards.list`, `sessions.github.options`, and `github.preview`, alongside
+the existing list requests. This enables the real bundled Workboard and GitHub
+plugins. Before the crash it persists the VAPID key, registers one synthetic
+subscription per paired device, disables delivery to each subscription, and
+creates one Workboard card per client through the real RPCs. Each reconnect sends
+`sessions.subscribe` first without awaiting its response, matching
+`ui/src/lib/sessions/index.ts` and its subscription owner, then issues the measured
+batch on that same socket. This preserves subscription head-of-line waits without
+a preceding `users.self` warm read. It is a bounded RPC workload, not a browser
+rendering benchmark or an exact replay of every UI scheduler dependency.
+`firstTwoMinutes` reports p50/p99 and errors for requests begun
+within 120 seconds of restart spawn; slow requests drain after the window.
+
+GitHub uses its real plugin, host authorization, anonymous reader and cache, with
+an Undici mock transport serving one fixed synthetic issue. The preload binds
+that transport explicitly to GitHub fetches and allows only loopback fetches
+outside the fixture. The run requires an observed
+post-restart fixture fetch plus the expected preview payload. This excludes
+external GitHub latency, managed-account refresh, avatars and pull-request
+decoration. `rpcPhaseMetrics` and `writer-metrics.prom` retain the existing
+admission, handler, first-response and queue-wait histograms; these are cumulative
+since exporter startup and do not cover requests before its subscription. Each
+revision needs a fresh fixture and the same driver options.
+
+Add `--transcript-reads --clients 50 --seconds 120` to exercise a cold session
+memory index during the reconnect wave. Setup leaves memory search disabled;
+immediately before restart the driver enables sessions-only FTS memory with
+`provider: "none"`. The first reconnecting client invokes the real `memory_search`
+tool once to open its default manager while all clients poll `chat.history` for
+the same interrupted session and `workboard.cards.list` for their seeded cards.
+No embedding service is used. The history target is a small interrupted turn;
+the seeded corpus supplies the large session inventory and transcript volume.
+This is a cold-index restart, not a fully indexed steady-state comparison.
+
+The private preload counts main-isolate native task submissions across all
+workers, grouped by the bounded input kind and history request kind. It
+retains no transcript content, paths, session identifiers, or call stacks. The
+first 120-second deadline is checked at submission, so a delayed IPC snapshot
+does not count later work. `nativeTaskInputs`, `transcriptQueueMetrics`,
+`firstTwoMinutesMainElu`, and per-RPC p95 fields provide the comparison. Native
+submission counts include work before the diagnostics exporter starts; queue
+metrics do not. Record the kind breakdown and verify memory catch-up actually
+ran before attributing an improvement to it. Use a fresh fixture for each revision.
+
 ## Sandbox measurements
 
 Follow the current host policy. On Team, use only a task-owned
@@ -166,3 +342,72 @@ Use loopback ports at least 40000. Never read/copy production databases or touch
 production services. Stop your own Gateway, then remove your sandbox after
 recording results. Local validation is limited to changed-file format/lint and
 focused tests; PR CI owns broad gates.
+
+## Allocated bytes per RPC or turn
+
+Use the same owned Gateway driver with `--allocations` and a named `--scenario`:
+
+```sh
+node --import ./scripts/tsx.mjs scripts/perf/transcript-broadcast-measure.ts \
+  --state-dir /path/to/team-shape --allocations --scenario sessions.list \
+  --clients 1 --runs 1 --operations 100 --limit 100 --rounds 5 \
+  --revision <measured-commit-sha>
+```
+
+Use `--row-mode sidebar --limit 200` for the sidebar's fact-packed wire response,
+or `--row-mode dashboard` for gallery rows. The default `compact` shape does not
+exercise sidebar fact packing; compare matching shapes when attributing allocation.
+The report records `rowMode` alongside the page limit.
+
+Supported scenarios:
+
+| Scenario               | One measured operation                                                                                     |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `sessions.list`        | One compact sidebar page RPC, `archived=all`, `--limit` rows                                               |
+| `subscribe`            | One `sessions.subscribe` snapshot registration/refresh RPC on the sender, with the same page shape as list |
+| `chat.send`            | One completed turn: synthetic read-tool call, then paced streaming answer; one client and one run          |
+| `transcript-broadcast` | One completed `agent` turn, streamed to `--clients` subscribers; `--runs` concurrent turns per round       |
+| `plugins.reload`       | One live reload of a synthetic no-op plugin through the lifecycle RPC                                      |
+
+RPC scenarios use `--operations` per round. Turn scenarios use `--runs` (forced
+to one for `chat.send`); `--chunks` controls streamed answer size. `plugins.reload`
+defaults to one operation per round; other RPC scenarios default to 100. Count
+the warmup when choosing reload batches: the admin RPC allows 30 calls per minute.
+Setup, startup
+recovery, subscription establishment, and one warmup round are outside capture.
+Each measured window includes completion and event drain, including the one-second
+quiet interval. The fixture inventory and request/client/run counts are recorded
+in `result.json`; the driver prints each sample as JSON and a short table.
+Raw `.heapprofile` files and numeric diagnostics remain alongside the report.
+Each profile also records `.worker-messages.json`: main-to-worker and
+worker-to-main message counts, known payload bytes, and unmeasured-message counts
+by bounded message kind for that capture window. Divide those totals by the
+validated operation count when comparing bytes or messages per RPC/turn. Buffer
+lengths are exact and string lengths approximate UTF-16 storage; envelope and
+object-graph sizes are not included. Compare the unmeasured counts too: a kind
+with no known bytes is not necessarily cheap. These are logical payload bytes,
+including transferred buffers, rather than bytes copied by structured clone.
+Use a freshly generated fixture on each revision and compare multiple rounds.
+The driver adds a small parent/child session set; those sessions are included in
+list measurements. For production-shaped database size use `--transcript-mib 1500`
+when generating the fixture and record its actual database bytes.
+
+The existing private benchmark IPC preload samples the **Gateway main isolate**,
+with both `includeObjectsCollectedByMajorGC` and
+`includeObjectsCollectedByMinorGC` enabled and a 32 KiB average interval. V8's
+node `selfSize` totals estimate allocated bytes, including objects collected
+during capture. `estimatedAllocatedBytesPerOperation` divides that total by the
+validated completed operation count. Top sites include up to eight caller frames
+in entry-to-leaf order. These are statistical estimates: small batches can have
+substantial sampling noise. Run an idle comparison if background allocation is
+material; the driver does not subtract it or silently present heap deltas as churn.
+
+`gcMs`, `gcCount`, and `gcMsPerOperation` come from the main isolate's GC performance
+entries. Heap-used and RSS deltas are separate context fields. Worker allocations,
+worker GC, external buffers, and driver/model-fixture allocation are **not** in
+these per-operation estimates. Process CPU and RSS include workers; main-thread
+CPU is reported separately. Profiling adds CPU and memory overhead, so compare
+with the same sampling settings. No profiling runs when `--allocations` is absent.
+For live operator attribution, `diagnostics.heapProfile` accepts
+`{ "durationMs": 10000, "includeCollected": true }` with the existing admin
+scope and 30-second churn cap; it remains a timed sample, not an RPC denominator.

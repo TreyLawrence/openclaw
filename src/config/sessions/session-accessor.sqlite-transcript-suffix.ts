@@ -15,13 +15,13 @@ import {
   type SqliteTranscriptStorageRow,
 } from "./session-accessor.sqlite-read.js";
 import { getSessionKysely, type ResolvedTranscriptScope } from "./session-accessor.sqlite-scope.js";
+import { insertTranscriptRowsWithoutProjectionInTransaction } from "./session-accessor.sqlite-transcript-batch.js";
 import {
   pruneTranscriptReactionsInTransaction,
   readTranscriptMutationStateInTransaction,
   rotateTranscriptGenerationInTransaction,
   touchTranscriptMutationInTransaction,
 } from "./session-accessor.sqlite-transcript-state.js";
-import { insertTranscriptRowsWithoutProjectionInTransaction } from "./session-accessor.sqlite-transcript-store.js";
 import { prepareIncrementalSuffixIdempotencyMutation } from "./session-accessor.sqlite-transcript-suffix-idempotency.js";
 import {
   markSessionTranscriptIndexDirtyInTransaction,
@@ -80,6 +80,7 @@ function readTranscriptSuffixStorageRows(
       .select([
         "created_at",
         projectTranscriptRetainedDataSql(
+          database.db,
           transcriptEventJsonSql(database.db),
           retainedCustomDataIds,
         ).as("event_json"),
@@ -512,7 +513,10 @@ export function replaceSqliteTranscriptSuffixInTransaction(
             .onRef("event.session_id", "=", "identity.session_id")
             .onRef("event.seq", "=", "identity.seq"),
         )
-        .select([transcriptEventNavigationSql("event").as("event_json"), "identity.event_id"])
+        .select([
+          transcriptEventNavigationSql(database.db, "event").as("event_json"),
+          "identity.event_id",
+        ])
         .where("identity.session_id", "=", resolved.sessionId)
         .where("identity.seq", "<", plan.startSeq)
         .where("identity.message_idempotency_key", "is", null)

@@ -2,6 +2,7 @@
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { GatewayCredentialsRequiredError } from "../../gateway/call-device-auth.js";
 import { gatewayHealthResponse } from "../../gateway/health-response.test-support.js";
 import { createGatewayCloseTransportError } from "../../gateway/transport-error.js";
 import { createGatewayRestartDeadline } from "./restart-health-deadline.js";
@@ -14,6 +15,7 @@ import {
   callGateway,
   gatewayResponseError,
   requestReadinessProbe,
+  requestStartupProbe,
   resetRestartHealthMocks,
   restoreRestartHealthMocks,
   sleep,
@@ -113,6 +115,71 @@ describe("restart health", () => {
         });
       });
     }
+  });
+
+  it.each([
+    { transport: "response", ready: true, build: "candidate-build", outcome: "healthy" },
+    { transport: "close", ready: true, build: "candidate-build", outcome: "healthy" },
+    { transport: "response", ready: false, build: "candidate-build", outcome: "auth-rejected" },
+    { transport: "response", ready: true, build: "old-build", outcome: "build-id-mismatch" },
+    { transport: "credentials", ready: true, build: "candidate-build", outcome: "healthy" },
+  ])("settles policy rejection through HTTP ($transport, $ready, $build)", async (scenario) => {
+    const credentialError = new GatewayCredentialsRequiredError({
+      method: "health",
+      configPath: "fixture-config.json",
+    });
+    const reason =
+      scenario.transport === "credentials" ? credentialError.message : "device identity required";
+    callGateway.mockRejectedValue(
+      scenario.transport === "credentials"
+        ? credentialError
+        : scenario.transport === "close"
+          ? createGatewayCloseTransportError({
+              code: 1008,
+              reason,
+              requestDispatched: false,
+              connectionDetails: {
+                url: "ws://127.0.0.1:18789",
+                urlSource: "local loopback",
+                message: "local fixture",
+              },
+            })
+          : gatewayResponseError(reason),
+    );
+    inspectPortUsage.mockResolvedValue(ownedPortUsage);
+    requestStartupProbe.mockResolvedValue({
+      statusCode: 200,
+      body: JSON.stringify({
+        ok: true,
+        status: "started",
+        version: "2026.10.4",
+        buildId: scenario.build,
+      }),
+    });
+    requestReadinessProbe.mockResolvedValue({
+      statusCode: scenario.ready ? 200 : 503,
+      body: JSON.stringify({ ready: scenario.ready }),
+    });
+    const { waitForGatewayHealthyRestart } = await import("./restart-health.js");
+    const snapshot = await waitForGatewayHealthyRestart({
+      service: makeGatewayService({ status: "running", pid: 8000 }),
+      port: 18789,
+      expectedVersion: "2026.10.4",
+      expectedBuildId: "candidate-build",
+      requirePluginHealth: false,
+      requireChannelHealth: false,
+      timeoutMs: 1_800_000,
+      delayMs: 30_000,
+    });
+    expect(snapshot.waitOutcome).toBe(scenario.outcome);
+    expect(snapshot.healthy).toBe(scenario.outcome === "healthy");
+    expect(snapshot.authenticationError).toEqual(
+      scenario.transport === "credentials"
+        ? expect.stringContaining("requires credentials")
+        : reason,
+    );
+    expect(callGateway).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
   });
 
   it("keeps the readiness deadline monotonic when the wall clock rewinds", async () => {
@@ -310,7 +377,7 @@ describe("restart health", () => {
     );
   });
 
-  it("marks matching-version restarts unhealthy when activated plugins failed to load", async () => {
+  it("stops waiting once the expected-version gateway reports activated plugin errors", async () => {
     callGateway.mockImplementation(
       gatewayHealthResponse({
         server: { version: "2026.4.24", connId: "new" },
@@ -335,14 +402,18 @@ describe("restart health", () => {
         },
       }),
     );
+    inspectPortUsage.mockResolvedValue(ownedPortUsage);
 
-    const snapshot = await inspectGatewayRestartWithSnapshot({
-      runtime: { status: "running", pid: 8000 },
+    const { waitForGatewayHealthyRestart } = await import("./restart-health.js");
+    const snapshot = await waitForGatewayHealthyRestart({
+      service: makeGatewayService({ status: "running", pid: 8000 }),
+      port: 18789,
       expectedVersion: "2026.4.24",
-      portUsage: ownedPortUsage,
     });
 
     expect(snapshot.healthy).toBe(false);
+    expect(snapshot.waitOutcome).toBe("plugin-errors");
+    expect(snapshot.elapsedMs).toBe(0);
     expect(snapshot.gatewayVersion).toBe("2026.4.24");
     expect(snapshot.expectedVersion).toBe("2026.4.24");
     expect(snapshot.activatedPluginErrors).toEqual([
@@ -358,46 +429,12 @@ describe("restart health", () => {
       method: "health",
       scopes: ["operator.read"],
     });
+    expect(sleep).not.toHaveBeenCalled();
 
     const { renderRestartDiagnostics } = await import("./restart-health.js");
     expect(renderRestartDiagnostics(snapshot).join("\n")).toContain(
       "Activated plugin load errors:\n- telegram: failed to load plugin dependency: ENOSPC",
     );
-  });
-
-  it("stops waiting once the expected-version gateway reports activated plugin errors", async () => {
-    callGateway.mockImplementation(
-      gatewayHealthResponse({
-        server: { version: "2026.4.24", connId: "new" },
-        health: {
-          ok: true,
-          plugins: {
-            errors: [
-              {
-                id: "telegram",
-                origin: "bundled",
-                activated: true,
-                error: "failed to load plugin dependency: ENOSPC",
-              },
-            ],
-          },
-        },
-      }),
-    );
-    inspectPortUsage.mockResolvedValue(ownedPortUsage);
-
-    const { waitForGatewayHealthyRestart } = await import("./restart-health.js");
-    const snapshot = await waitForGatewayHealthyRestart({
-      service: makeGatewayService({ status: "running", pid: 8000 }),
-      port: 18789,
-      expectedVersion: "2026.4.24",
-    });
-
-    expect(snapshot.healthy).toBe(false);
-    expect(snapshot.waitOutcome).toBe("plugin-errors");
-    expect(snapshot.elapsedMs).toBe(0);
-    expect(snapshot.activatedPluginErrors?.[0]?.id).toBe("telegram");
-    expect(sleep).not.toHaveBeenCalled();
   });
 
   it("stops waiting once the expected-version gateway reports channel probe errors", async () => {

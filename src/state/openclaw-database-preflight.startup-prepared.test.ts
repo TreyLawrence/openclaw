@@ -52,17 +52,20 @@ function createFleet() {
     }
   }
   const onAgentInspection = vi.fn();
+  const onRegisteredAgentDatabases = vi.fn();
   return {
     config,
     env,
     paths,
     onAgentInspection,
+    onRegisteredAgentDatabases,
     ready: () =>
       assertOpenClawDatabasesReady({
         env,
         config,
         operation: "gateway-startup",
         onAgentInspection,
+        onRegisteredAgentDatabases,
       }),
     inspect: (signal?: AbortSignal) =>
       preflightOpenClawDatabaseSchemas({
@@ -166,59 +169,76 @@ it("isolates an unreadable configured path while inspecting healthy agents", asy
   );
 });
 
-it("keeps pending startup stores fenced without inspecting or copying them again in bootstrap", async () => {
-  const fleet = createFleet();
-  const pathname = fleet.paths[0]!;
-  const raw = new (requireNodeSqlite().DatabaseSync)(pathname);
-  raw.exec("PRAGMA journal_mode=WAL;");
-  raw.close();
-  const entered = createDeferred();
-  const release = createDeferred();
-  const createReader = schemaInspection.createAgentSchemaInspectionWorker;
-  let paused = false;
-  let selectedInspections = 0;
-  vi.spyOn(schemaInspection, "createAgentSchemaInspectionWorker").mockImplementation(() => {
-    const reader = createReader();
-    const inspect = reader.inspect;
-    return Object.assign(reader, {
-      inspect: async (...args: Parameters<typeof inspect>) => {
-        if (args[0].pathname === pathname) {
-          selectedInspections += 1;
-          if (!paused) {
-            paused = true;
-            entered.resolve();
-            await release.promise;
-          }
-        }
-        return inspect(...args);
-      },
-    });
-  });
-  const prepare = vi.spyOn(snapshots, "prepareSqliteReadOnlyLocation");
-  await withAgentDatabaseStartupAdmission(async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    const readiness = fleet.ready();
-    try {
-      await entered.promise;
-      await vi.advanceTimersByTimeAsync(5_000);
-      await readiness;
-      vi.useRealTimers();
-      const refusal = readAgentDatabaseAdmissionRefusal("first", { env: fleet.env });
-      expect(refusal?.code).toBe("agent-database-inspection-pending");
-      expect(selectedInspections).toBe(1);
-
-      const bootstrap = await fleet.inspect();
-      expect(bootstrap.agentRefusals).toContain(refusal);
-      expect(readAgentDatabaseAdmissionRefusal("first", { env: fleet.env })).toBe(refusal);
-      expect(selectedInspections).toBe(1);
-      expect(prepare.mock.calls.filter(([source]) => source === pathname)).toEqual([]);
-    } finally {
-      vi.useRealTimers();
-      release.resolve();
-      await Promise.allSettled([readiness]);
+it.for(["native", "ACP-only"] as const)(
+  "keeps pending %s stores fenced without inspecting or copying them again in bootstrap",
+  async (kind) => {
+    const fleet = createFleet();
+    if (kind === "ACP-only") {
+      fleet.config.acp = { enabled: true, allowedAgents: ["codex"] };
     }
-  });
-});
+    const agentId = kind === "ACP-only" ? "codex" : "first";
+    const pathname =
+      kind === "ACP-only"
+        ? openOpenClawAgentDatabase({ agentId, env: fleet.env }).path
+        : fleet.paths[0]!;
+    closeOpenClawAgentDatabasesForTest();
+    closeOpenClawStateDatabaseForTest();
+    const raw = new (requireNodeSqlite().DatabaseSync)(pathname);
+    raw.exec("PRAGMA journal_mode=WAL;");
+    raw.close();
+    const entered = createDeferred();
+    const release = createDeferred();
+    const createReader = schemaInspection.createAgentSchemaInspectionWorker;
+    let paused = false;
+    let selectedInspections = 0;
+    vi.spyOn(schemaInspection, "createAgentSchemaInspectionWorker").mockImplementation(() => {
+      const reader = createReader();
+      const inspect = reader.inspect;
+      return Object.assign(reader, {
+        inspect: async (...args: Parameters<typeof inspect>) => {
+          if (args[0].pathname === pathname) {
+            selectedInspections += 1;
+            if (!paused) {
+              paused = true;
+              entered.resolve();
+              await release.promise;
+            }
+          }
+          return inspect(...args);
+        },
+      });
+    });
+    const prepare = vi.spyOn(snapshots, "prepareSqliteReadOnlyLocation");
+    await withAgentDatabaseStartupAdmission(async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+      const readiness = fleet.ready();
+      let settled = false;
+      void readiness.then(() => {
+        settled = true;
+      });
+      try {
+        await entered.promise;
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(settled).toBe(true);
+        await readiness;
+        vi.useRealTimers();
+        const refusal = readAgentDatabaseAdmissionRefusal(agentId, { env: fleet.env });
+        expect(refusal?.code).toBe("agent-database-inspection-pending");
+        expect(selectedInspections).toBe(1);
+
+        const bootstrap = await fleet.inspect();
+        expect(bootstrap.agentRefusals).toContain(refusal);
+        expect(readAgentDatabaseAdmissionRefusal(agentId, { env: fleet.env })).toBe(refusal);
+        expect(selectedInspections).toBe(1);
+        expect(prepare.mock.calls.filter(([source]) => source === pathname)).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+        release.resolve();
+        await Promise.allSettled([readiness]);
+      }
+    });
+  },
+);
 
 it("carries fleet compatibility once into bootstrap while readiness always inspects fresh", async () => {
   const fleet = createFleet();
@@ -297,6 +317,12 @@ it("reads newly registered stores without copying admitted state after startup w
   await withAgentDatabaseStartupAdmission(
     async () => {
       await fleet.ready();
+      expect(fleet.onRegisteredAgentDatabases).toHaveBeenLastCalledWith(
+        fleet.paths.map((pathname, index) => ({
+          agentId: ["first", "second", "third"][index],
+          path: pathname,
+        })),
+      );
       const changedPath = openOpenClawAgentDatabase({ agentId: "newcomer", env: fleet.env }).path;
       closeOpenClawAgentDatabasesForTest();
       closeOpenClawStateDatabaseForTest();
@@ -325,6 +351,10 @@ it("reads newly registered stores without copying admitted state after startup w
       expect(prepare.mock.calls.filter(([pathname]) => pathname === statePath)).toHaveLength(0);
       expect(fleet.onAgentInspection).toHaveBeenLastCalledWith(
         expect.objectContaining({ schemaInspectionCount: 1 }),
+      );
+      await fleet.ready();
+      expect(fleet.onRegisteredAgentDatabases).toHaveBeenLastCalledWith(
+        expect.arrayContaining([{ agentId: "newcomer", path: changedPath }]),
       );
     },
     { deferInspections: false },

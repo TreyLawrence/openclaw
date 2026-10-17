@@ -6,7 +6,7 @@ import { resolveZstdCodec } from "./zstd-codec.js";
 
 // Cache data is rebuildable. Semantic changes get a new version; old rows are
 // ignored and rebuilt instead of normalized through a runtime compatibility path.
-export const USAGE_COST_ROLLUP_VERSION = 7;
+export const USAGE_COST_ROLLUP_VERSION = 8;
 const USAGE_COST_ROLLUP_FORMAT_VERSION = 1;
 export const USAGE_COST_ROLLUP_SCOPE = "session-cost-usage-rollup-v3";
 const zstd = resolveZstdCodec();
@@ -46,7 +46,7 @@ export type UsageCostRollupEntry = {
 export type UsageCostRollupEnvelope = Omit<UsageCostRollupEntry, "rollup"> & {
   format: typeof USAGE_COST_ROLLUP_FORMAT_VERSION;
   projection?: {
-    version: 2;
+    version: 3;
     dates: string[];
     canonicalNumbers: boolean;
   };
@@ -102,7 +102,7 @@ export function decodeUsageCostRollupEnvelope(
       return undefined;
     }
     if (
-      (record.version !== USAGE_COST_ROLLUP_VERSION && record.version !== 6) ||
+      record.version !== USAGE_COST_ROLLUP_VERSION ||
       record.format !== USAGE_COST_ROLLUP_FORMAT_VERSION ||
       typeof record.pricingFingerprint !== "string" ||
       (pricingFingerprint !== undefined && record.pricingFingerprint !== pricingFingerprint) ||
@@ -136,7 +136,7 @@ export function decodeUsageCostRollupEnvelope(
     if (
       record.projection !== undefined &&
       (!isRecord(record.projection) ||
-        record.projection.version !== 2 ||
+        record.projection.version !== 3 ||
         !Array.isArray(record.projection.dates) ||
         !record.projection.dates.every(
           (date) => typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date),

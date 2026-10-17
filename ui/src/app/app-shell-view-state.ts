@@ -1,10 +1,9 @@
-import { untrack } from "solid-js";
 import { isSettingsNavigationRoute, isSettingsTakeover } from "../app-navigation.ts";
 import { isSessionRouteId } from "../app-route-paths.ts";
 import { APP_ROUTE_IDS } from "../app-routes.ts";
-import { renderLazySettingsSidebar } from "../components/settings-sidebar-lazy.ts";
+import type { SettingsSidebarLoader } from "../components/settings-sidebar-lazy.tsx";
+import type { SettingsSidebarProps } from "../components/settings-sidebar.tsx";
 import type { ThemeModeChangeDetail } from "../components/theme-mode-toggle.ts";
-import { canCallGatewayMethod } from "../lib/gateway-methods.ts";
 import { resolveGatewayStatus } from "../lib/gateway-status.ts";
 import { readSessionMethodAccess } from "../lib/session-method-access.ts";
 import { normalizeAgentId } from "../lib/sessions/session-key.ts";
@@ -19,6 +18,7 @@ import type { ShellViewCallbacks } from "./app-shell-view-callbacks.ts";
 import type { ApplicationRuntime } from "./bootstrap.ts";
 import { canGoBackInNativeEmbed } from "./browser.ts";
 import type { ApplicationNavigationOptions } from "./context.ts";
+import type { ControlUiReadinessOutlet } from "./control-ui-readiness.ts";
 import { gatewayPresentationScope } from "./gateway-presentation-scope.ts";
 import {
   APP_SIDEBAR_ELEMENT,
@@ -32,26 +32,32 @@ import {
   floatingSidebarAttentionVisible,
   navigationSurfaceIsHidden,
   NAVIGATION_RAIL_WIDTH,
+  type ShellNavigationElements,
 } from "./navigation-surface.ts";
 import { readGatewayOperatorAccess } from "./operator-access.ts";
-import { isDesktopPanelAvailable, isHomePanelAvailable } from "./panel-availability.ts";
+import {
+  isCustodianPanelAvailable,
+  isDesktopPanelAvailable,
+  isHomePanelAvailable,
+} from "./panel-availability.ts";
 import { resolveProfileAppearancePrefs } from "./server-prefs-profile.ts";
 import { NAV_WIDTH_MAX, normalizeCatalogOpenTarget } from "./settings.ts";
 import type { ShellLayoutOwner } from "./shell-layout-owner.ts";
 
-export interface ShellViewHost extends ShellLazyOverlayHost {
+export interface ShellViewHost extends ShellLazyOverlayHost, ShellNavigationElements {
+  routeOutlet?: ControlUiReadinessOutlet;
+  terminalPanel?: HTMLElement & { readonly available?: boolean };
   readonly devicePairSetup: DevicePairSetupLoader;
   readonly shellRevision: () => number;
-  readonly settingsSidebar: Parameters<typeof renderLazySettingsSidebar>[0];
+  readonly settingsSidebar: SettingsSidebarLoader;
   readonly runtime: ApplicationRuntime | undefined;
   readonly activeSessionKey: string;
   readonly custodianMinimizeRequestId: number;
   readonly desktopNavigationExpanded: boolean;
   readonly execApprovalElement: OptionalCustomElement;
   readonly onboardingMemoryImportElement: OptionalCustomElement;
-  readonly nativeHistoryState: NativeHistoryState;
+  readonly nativeHistoryState: () => NativeHistoryState;
   readonly navDrawerOpen: boolean;
-  navResizing: boolean;
   readonly shellLayout: ShellLayoutOwner;
   readonly navigationSidebar: HTMLElement;
   readonly onboardingMode: boolean;
@@ -71,15 +77,12 @@ export interface ShellViewHost extends ShellLazyOverlayHost {
   readonly navigate: (routeId: string, options?: ApplicationNavigationOptions) => void;
   refreshControlUi: () => Promise<boolean>;
   recoverNotFoundRoute: () => boolean;
-  prepareView(): void;
   invalidate(): void;
-  querySelectorAll: ParentNode["querySelectorAll"];
   resizeNavigation(splitRatio: number): void;
   readonly toggleNavigationSurface: (trigger?: HTMLElement) => void;
 }
 
 export function readShellView(host: ShellViewHost) {
-  untrack(() => host.prepareView());
   const context = host.context;
   const runtime = host.runtime;
   const callbacks = host.viewCallbacks;
@@ -93,9 +96,10 @@ export function readShellView(host: ShellViewHost) {
   const navigationSnapshot = context.navigation.snapshot;
   const overlaySnapshot = context.overlays.snapshot;
   const controlUiRefreshRequired = overlaySnapshot.controlUiRefreshRequired;
-  const historyRecovering = [...host.querySelectorAll<ChatPaneElement>("openclaw-chat-pane")].some(
-    (pane) => pane.conversationPresented && pane.historyRecovering,
-  );
+  // Chat owns the live panes beneath its retained route island.
+  const historyRecovering = [
+    ...(host.routeOutlet?.querySelectorAll<ChatPaneElement>("openclaw-chat-pane") ?? []),
+  ].some((pane) => pane.conversationPresented && pane.historyRecovering);
   const connectionStatus = resolveGatewayStatus(
     gatewaySnapshot,
     controlUiRefreshRequired,
@@ -116,23 +120,10 @@ export function readShellView(host: ShellViewHost) {
   const terminalAvailable = isTerminalAvailable(gatewaySnapshot, config.terminalEnabled ?? false);
   const desktopPanelAvailable = isDesktopPanelAvailable(gatewaySnapshot);
   const homePanelAvailable = isHomePanelAvailable(context.gateway);
-  const custodianPanelAvailable =
-    // Scope-aware to match the store: admin-only, never advertisement alone.
-    canCallGatewayMethod(gatewaySnapshot, "openclaw.chat", "operator.admin");
+  const custodianPanelAvailable = isCustodianPanelAvailable(context.gateway);
   const activeRoute = host.routeState.routeId ?? "chat";
   const sessionRoute = isSessionRouteId(activeRoute);
-  // Session routes have an offline outbox, New Session keeps a local draft, and
-  // Appearance persists local preference intent for replay. Connection settings
-  // must remain usable to replace an unreachable Gateway. Their server actions
-  // are independently gated; other pages cannot submit useful disconnected work.
   const reloadRequired = gatewaySnapshot.phase === "reload-required";
-  const pageActionsBlocked =
-    !reloadRequired &&
-    !gatewayConnected &&
-    !sessionRoute &&
-    activeRoute !== "new-session" &&
-    activeRoute !== "appearance" &&
-    activeRoute !== "connection";
   // Plugin tabs share one route; the URL picks the active item.
   const activePluginRef =
     activeRoute === "plugin"
@@ -210,10 +201,7 @@ export function readShellView(host: ShellViewHost) {
     sessionScope: true,
   });
   const newSessionDisabledReason = newSessionAccess.allowed ? undefined : newSessionAccess.reason;
-  const workspaceReplacement =
-    activeRoute === "plugins" || activeRoute === "plugin-settings"
-      ? undefined
-      : context.plugins.selectedReplacement("workspace");
+  const workspacePluginsEnabled = activeRoute !== "plugins" && activeRoute !== "plugin-settings";
   const uiSettings = context.theme.settings;
   // Unknown profile preferences are not absence. Keep the first shell paint
   // image-free so a saved None choice cannot download artwork before hydration.
@@ -265,7 +253,7 @@ export function readShellView(host: ShellViewHost) {
   const shellConnectionStatus =
     (navigationSurfaceHidden ||
       (settingsTakeover
-        ? host.settingsSidebar.renderer === null
+        ? host.settingsSidebar.renderer() === null
         : !isOptionalElementDefined(APP_SIDEBAR_ELEMENT))) &&
     !nativeEmbed &&
     !onboarding &&
@@ -283,74 +271,69 @@ export function readShellView(host: ShellViewHost) {
     onRefresh: host.refreshControlUi,
     onNavigate: host.navigate,
   };
-  const navigationContent =
-    settingsTakeover || embedNavigation
-      ? renderLazySettingsSidebar(host.settingsSidebar, {
-          presentation: nativeEmbed ? (embedSettingsRoot ? "embed-list" : "embed-page") : "sidebar",
-          basePath: context.basePath,
-          activeRouteId: activeRoute,
-          agents: context.agents.state.agentsList?.agents ?? [],
-          agentIdentity: context.agentIdentity,
-          settingsAgentSelection: context.settingsAgentSelection,
-          activePathname: host.routeState.location?.pathname ?? "",
-          activeSearch: host.routeState.location?.search ?? "",
-          activeHash: host.routeState.location?.hash ?? "",
-          connectionStatus,
-          lastError: gatewaySnapshot.lastError,
-          gatewayVersion: config.serverVersion ?? gatewaySnapshot.hello?.server?.version ?? "",
-          searchQuery: embedSettingsRoot ? "" : host.settingsSearchQuery,
-          searchParams: {
-            query: host.settingsSearchQuery,
-            schema: runtimeConfig.configSchema,
-            value: runtimeConfig.configForm ?? runtimeConfig.configSnapshot?.config ?? null,
-            uiHints: runtimeConfig.configUiHints,
-            identityAvailable: Boolean(gatewaySnapshot.selfUser),
-            multipleProfiles:
-              gatewaySnapshot.hello?.policy?.hasMultipleSessionSharingIdentities === true,
-            basePath: context.basePath,
-            canAdmin: operatorAccess.canAdmin,
-            nativeDeviceSettings: context.nativeDeviceSettings,
-          },
-          onExit: () => {
-            if (!nativeEmbed) {
-              host.exitSettings();
-            } else if (canGoBackInNativeEmbed()) {
-              window.history.back();
-            } else if (activeRoute === "memory-import") {
-              context.replace("memory");
-            } else {
-              host.navigate("settings");
-            }
-          },
-          onRetryConnect: callbacks.retryGateway,
-          onNavigate: host.navigate,
-          onPreload: callbacks.preloadRoute,
-          onSearchQueryChange: (nextQuery) => void host.handleSettingsSearchQueryChange(nextQuery),
-          preloadTimers: host.settingsPreloadTimers,
-          saveIndicator: {
-            status: runtimeConfig.configRecoveryError
-              ? "recovery"
-              : runtimeConfig.configAutoSaveStatus,
-            lastError: runtimeConfig.configRecoveryError ?? runtimeConfig.lastError,
-            needsApply: runtimeConfig.configNeedsApply,
-            applying: runtimeConfig.configApplying,
-            applyDisabled:
-              context.runtimeConfig.canApply === false ||
-              runtimeConfig.configLoading ||
-              runtimeConfig.configSaving ||
-              (runtimeConfig.configFormDirty && runtimeConfig.configFormMode === "raw") ||
-              updateBusy,
-            onRetry: () => void context.runtimeConfig.retry(),
-            onSave: () => void context.runtimeConfig.save(),
-            onReload: () => void context.runtimeConfig.discardDraft(),
-            onApply: () => void context.runtimeConfig.apply(),
-          },
-          canAdmin: operatorAccess.canAdmin,
-          nativeDeviceSettings: context.nativeDeviceSettings,
-        })
-      : null;
+  const settingsSidebarProps: SettingsSidebarProps = {
+    presentation: nativeEmbed ? (embedSettingsRoot ? "embed-list" : "embed-page") : "sidebar",
+    basePath: context.basePath,
+    activeRouteId: activeRoute,
+    agents: context.agents.state.agentsList?.agents ?? [],
+    agentIdentity: context.agentIdentity,
+    settingsAgentSelection: context.settingsAgentSelection,
+    activePathname: host.routeState.location?.pathname ?? "",
+    activeSearch: host.routeState.location?.search ?? "",
+    activeHash: host.routeState.location?.hash ?? "",
+    connectionStatus,
+    lastError: gatewaySnapshot.lastError,
+    gatewayVersion: config.serverVersion ?? gatewaySnapshot.hello?.server?.version ?? "",
+    searchQuery: embedSettingsRoot ? "" : host.settingsSearchQuery,
+    searchParams: {
+      query: host.settingsSearchQuery,
+      schema: runtimeConfig.configSchema,
+      value: runtimeConfig.configForm ?? runtimeConfig.configSnapshot?.config ?? null,
+      uiHints: runtimeConfig.configUiHints,
+      identityAvailable: Boolean(gatewaySnapshot.selfUser),
+      multipleProfiles: gatewaySnapshot.hello?.policy?.hasMultipleSessionSharingIdentities === true,
+      basePath: context.basePath,
+      canAdmin: operatorAccess.canAdmin,
+      nativeDeviceSettings: context.nativeDeviceSettings,
+    },
+    onExit: () => {
+      if (!nativeEmbed) {
+        host.exitSettings();
+      } else if (canGoBackInNativeEmbed()) {
+        window.history.back();
+      } else if (activeRoute === "memory-import") {
+        context.replace("memory");
+      } else {
+        host.navigate("settings");
+      }
+    },
+    onRetryConnect: callbacks.retryGateway,
+    onNavigate: host.navigate,
+    onPreload: callbacks.preloadRoute,
+    onSearchQueryChange: (nextQuery) => void host.handleSettingsSearchQueryChange(nextQuery),
+    preloadTimers: host.settingsPreloadTimers,
+    saveIndicator: {
+      status: runtimeConfig.configRecoveryError ? "recovery" : runtimeConfig.configAutoSaveStatus,
+      lastError: runtimeConfig.configRecoveryError ?? runtimeConfig.lastError,
+      needsApply: runtimeConfig.configNeedsApply,
+      applying: runtimeConfig.configApplying,
+      applyDisabled:
+        context.runtimeConfig.canApply === false ||
+        runtimeConfig.configLoading ||
+        runtimeConfig.configSaving ||
+        (runtimeConfig.configFormDirty && runtimeConfig.configFormMode === "raw") ||
+        updateBusy,
+      onRetry: () => void context.runtimeConfig.retry(),
+      onSave: () => void context.runtimeConfig.save(),
+      onReload: () => void context.runtimeConfig.discardDraft(),
+      onApply: () => void context.runtimeConfig.apply(),
+    },
+    canAdmin: operatorAccess.canAdmin,
+    nativeDeviceSettings: context.nativeDeviceSettings,
+  };
   return {
     nowMs: Date.now(),
+    routeReady: host.routeState.routeId !== undefined || host.routeState.routeFailed,
     context,
     runtime,
     callbacks,
@@ -366,8 +349,11 @@ export function readShellView(host: ShellViewHost) {
     custodianPanelAvailable,
     activeRoute,
     sessionRoute,
+    workbenchRoute:
+      !host.routeState.routeFailed &&
+      !host.routeState.sessionRouteNotice &&
+      isSessionRouteId(host.routeState.routeId),
     reloadRequired,
-    pageActionsBlocked,
     nativeEmbed,
     embedSettings,
     settingsTakeover,
@@ -386,7 +372,7 @@ export function readShellView(host: ShellViewHost) {
     shellWidth,
     selectedAgentId,
     newSessionDisabledReason,
-    workspaceReplacement,
+    workspacePluginsEnabled,
     uiSettings,
     backgroundReady,
     chatLikeRoute,
@@ -395,7 +381,7 @@ export function readShellView(host: ShellViewHost) {
     collapsedControls,
     shellConnectionStatus,
     floatingUpdateCard,
-    navigationContent,
+    settingsSidebarProps,
     navigationSnapshot,
   };
 }

@@ -7,7 +7,7 @@ import { parseCatalogSessionKey } from "../../lib/sessions/catalog-key.ts";
 import { showToast } from "../../lib/toast.ts";
 import { uploadsEnabled, uploadsDisabledMessage } from "../../lib/uploads.ts";
 import { sendSessionObserverVisibility } from "./chat-observer.ts";
-import { ChatPaneBase } from "./chat-pane-base.ts";
+import { ChatPaneStateOwner } from "./chat-pane-state-owner.ts";
 import {
   ChatSessionCompanionThreads,
   type ChatSessionCompanionTurn,
@@ -29,7 +29,7 @@ import {
   sidebarMainPanel,
 } from "./sidebar-layout.ts";
 
-export abstract class ChatPaneSidePanels extends ChatPaneBase {
+export abstract class ChatPaneSidePanels extends ChatPaneStateOwner {
   protected sessionCompanionHydrationKey = "";
   protected sessionCompanionFocusGeneration = 0;
   private sessionCompanionPresented = false;
@@ -38,15 +38,13 @@ export abstract class ChatPaneSidePanels extends ChatPaneBase {
   protected subagentsShowRequest?: () => string | null | undefined;
   /** The control a background panel was opened from in a narrow pane; the region takes it once. */
   protected sideFocusOrigin?: () => HTMLElement | null;
-  protected readonly sessionCompanionThreads = new ChatSessionCompanionThreads(() => {
-    this.requestUpdate();
-  });
+  readonly sessionCompanionThreads = new ChatSessionCompanionThreads();
   protected readonly setSessionObserverVisibility = (visible: boolean) => {
     const state = this.state;
     if (state?.connected && state.client) {
       void sendSessionObserverVisibility(state.client, visible).catch(() => undefined);
     }
-    this.requestUpdate();
+    this.invalidate();
   };
 
   protected restorePaneSidebarLayout(layout: SidebarLayout): SidebarLayout {
@@ -78,6 +76,15 @@ export abstract class ChatPaneSidePanels extends ChatPaneBase {
     );
   }
 
+  protected toggleConversationPanel(layout: SidebarLayout): void {
+    const changeSlot = isSidebarSlotVisible(layout, "conversation") ? closeSlot : openSlot;
+    const nextLayout = changeSlot(layout, "conversation");
+    this.commitSidebarLayout(nextLayout, { dashboardPresentation: "personal" });
+    if (layout.columns[0]?.panels.some((panel) => panel.slot === "companion")) {
+      this.setSessionObserverVisibility(isSidebarSlotVisible(nextLayout, "companion"));
+    }
+  }
+
   protected requestSessionRail(intent: "open" | "toggle"): void {
     const state = this.state;
     if (!state) {
@@ -89,10 +96,6 @@ export abstract class ChatPaneSidePanels extends ChatPaneBase {
     this.setSessionObserverVisibility(!closing);
   }
 
-  requestSubagentsPanel(intent: "open" | "toggle"): void {
-    this.requestBackgroundPanel("subagents", intent);
-  }
-
   /** Opens the Subagents panel on one subagent, or on its list. */
   protected showSubagents(subagentKey: string | null, focus = false): void {
     const sessionKey = this.state?.sessionKey;
@@ -101,12 +104,12 @@ export abstract class ChatPaneSidePanels extends ChatPaneBase {
     const take = () => {
       if (this.subagentsShowRequest === take) {
         this.subagentsShowRequest = undefined;
-        this.requestUpdate();
+        this.invalidate();
       }
       return this.state?.sessionKey === sessionKey ? subagentKey : undefined;
     };
     this.subagentsShowRequest = take;
-    this.requestUpdate();
+    this.invalidate();
     this.requestBackgroundPanel("subagents", "open");
     if (focus) {
       void this.focusSubagentsPanel();
@@ -117,9 +120,10 @@ export abstract class ChatPaneSidePanels extends ChatPaneBase {
     const state = this.state;
     const sessionKey = state?.sessionKey;
     await customElements.whenDefined("openclaw-chat-sidebar-region");
-    this.requestUpdate();
+    this.invalidate();
     await this.updateComplete;
-    const region = this.renderRoot.querySelector("openclaw-chat-sidebar-region");
+    // The lazy sidebar owns its header DOM; wait for its commit before resolving the focus target.
+    const region = this.element.querySelector("openclaw-chat-sidebar-region");
     await region?.updateComplete;
     const tab = region?.parentElement?.querySelector<HTMLButtonElement>(
       '[data-region-header="side"] .tabstrip-tab[aria-selected="true"]',
@@ -160,8 +164,8 @@ export abstract class ChatPaneSidePanels extends ChatPaneBase {
     if (!closing && this.paneWidth < SIDEBAR_NARROW_BREAKPOINT_PX) {
       // The panel is about to replace the view this control is in; the region,
       // which may not have loaded yet, carries focus across from it.
-      const active = this.ownerDocument.activeElement;
-      const origin = active instanceof HTMLElement && this.contains(active) ? active : null;
+      const active = this.element.ownerDocument.activeElement;
+      const origin = active instanceof HTMLElement && this.element.contains(active) ? active : null;
       const take = () => {
         if (this.sideFocusOrigin === take) {
           this.sideFocusOrigin = undefined;
@@ -210,8 +214,8 @@ export abstract class ChatPaneSidePanels extends ChatPaneBase {
       composer.editRevision === editRevision &&
       pageState.chatMessage === draft &&
       this.sessionCompanionPresented &&
-      (this.ownerDocument.activeElement === this.ownerDocument.body ||
-        this.contains(this.ownerDocument.activeElement)) &&
+      (this.element.ownerDocument.activeElement === this.element.ownerDocument.body ||
+        this.element.contains(this.element.ownerDocument.activeElement)) &&
       this.isConnected &&
       this.active &&
       this.visuallyPresented &&
@@ -219,7 +223,7 @@ export abstract class ChatPaneSidePanels extends ChatPaneBase {
     const requestFocus = () => {
       if (this.sessionCompanionFocusRequest === requestFocus) {
         this.sessionCompanionFocusRequest = undefined;
-        this.requestUpdate();
+        this.invalidate();
       }
       return ownsFocus();
     };
@@ -230,11 +234,11 @@ export abstract class ChatPaneSidePanels extends ChatPaneBase {
     const { ownsFocus, requestFocus } = this.captureSessionCompanionFocus(pageState);
     // The first lazy mount and the completed answer share the same input intent.
     this.sessionCompanionFocusRequest = requestFocus;
-    this.requestUpdate();
+    this.invalidate();
     await this.submitSessionCompanionQuestion(question);
     if (ownsFocus()) {
       this.sessionCompanionFocusRequest = requestFocus;
-      this.requestUpdate();
+      this.invalidate();
     }
   }
 

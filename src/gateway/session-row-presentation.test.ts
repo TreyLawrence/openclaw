@@ -29,6 +29,7 @@ import {
 import { createGatewayConnectionState } from "./server-connection-state.js";
 import { createVisibleActiveSessionRunProjector } from "./server-methods/session-active-runs.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
+import { beginSessionPermissionChange } from "./session-permission-change.js";
 import { prepareProjectedSessionPresentation } from "./session-row-presentation.js";
 import { createSessionRowProjection } from "./session-row-projection.js";
 import { canReceiveSessionEvent } from "./session-sharing.js";
@@ -36,6 +37,46 @@ import { rolePolicyConfig, sharingPolicyClient } from "./session-sharing.test-ut
 import { listProjectedSessions } from "./session-utils-list.js";
 
 afterEach(() => vi.restoreAllMocks());
+
+it("shares immutable unplaced facts until permission or activity publications replace them", async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async () => {
+    const query = { agentId: "main", key: "agent:main:shared-facts" };
+    replaceSessionEntrySync(
+      { agentId: query.agentId, sessionKey: query.key },
+      {
+        sessionId: "shared-facts",
+        updatedAt: 1,
+      },
+    );
+    const projection = await createSessionRowProjection({
+      cfg: { agents: { entries: { main: {} } } },
+      modelCatalog: [],
+    });
+    let releasePending: (() => void) | undefined;
+    try {
+      const facts = projection.describe(query)!.facts!;
+      const initial = facts.present();
+      expect(facts.present()).toBe(initial);
+      expect(Object.isFrozen(initial)).toBe(true);
+      releasePending = beginSessionPermissionChange("shared-facts");
+      const pending = facts.present();
+      expect(pending.permissionModePending).toBe(true);
+      expect(pending).not.toBe(initial);
+      expect(initial.permissionModePending).toBe(false);
+      expect(facts.present()).toBe(pending);
+      releasePending();
+      const settled = facts.present();
+      expect(settled.permissionModePending).toBe(false);
+      expect(pending.permissionModePending).toBe(true);
+      facts.refreshActivitySummary();
+      expect(facts.present()).not.toBe(settled);
+      expect(facts.present().sessionModelRevision).toBe(initial.sessionModelRevision);
+    } finally {
+      releasePending?.();
+      projection.dispose();
+    }
+  });
+});
 
 it("projects send policy and recipient restrictions, clearing them when the current role permits sending", async () => {
   await withOpenClawTestState({ scenario: "minimal", prepareProfileCatalog: true }, async () => {
@@ -458,28 +499,23 @@ it("presents current recipient roles without SQLite while rejecting source overr
       for (const client of clients) {
         vi.mocked(client.socket).send.mockClear();
       }
-      vi.mocked(clients[0]!.socket).send.mockImplementationOnce(() => {
-        connection.chatAbortControllers.delete("old-run");
-        connection.chatAbortControllers.set("replacement-run", {
-          ...activeRun,
-          sessionKey: "agent:main:adopted-source",
-          sessionId: ` ${entry.sessionId} `,
-        });
+      connection.chatAbortControllers.delete("old-run");
+      connection.chatAbortControllers.set("replacement-run", {
+        ...activeRun,
+        sessionKey: "agent:main:adopted-source",
+        sessionId: ` ${entry.sessionId} `,
       });
       connection.broadcastToConnIds(
         "sessions.changed",
         { sessionKey: query.key, agentId: query.agentId },
         new Set(clients.map((client) => client.connId)),
       );
-      for (const [index, runId] of [
-        [0, "old-run"],
-        [1, "replacement-run"],
-      ] as const) {
-        const sends = vi.mocked(clients[index]!.socket).send.mock.calls;
+      for (const client of clients.slice(0, 2)) {
+        const sends = vi.mocked(client.socket).send.mock.calls;
         expect(sends).toHaveLength(1);
         expect(JSON.parse(String(sends[0]?.[0])).payload.session).toMatchObject({
           hasActiveRun: true,
-          activeRunIds: [runId],
+          activeRunIds: ["replacement-run"],
         });
       }
       expect(vi.mocked(clients[2]!.socket).send.mock.calls).toHaveLength(0);
@@ -499,27 +535,28 @@ it("presents current recipient roles without SQLite while rejecting source overr
         for (const client of clients) {
           vi.mocked(client.socket).send.mockClear();
         }
-        vi.mocked(clients[0]!.socket).send.mockImplementationOnce(() => {
-          if (change === "session-id") {
-            replacement.sessionId = "adopted-session";
-          } else if (change === "session-key") {
-            replacement.sessionKey = "agent:main:adopted-source";
-          } else if (change === "terminal") {
-            replacement.projectSessionActive = false;
-          } else if (change === "visibility") {
-            replacement.controlUiVisible = false;
-          } else {
-            replacement.agentId = "other";
-          }
-        });
         connection.broadcast("sessions.changed", { sessionKey: query.key, agentId: query.agentId });
-        for (const [index, hasActiveRun] of [true, false].entries()) {
-          const sends = vi.mocked(clients[index]!.socket).send.mock.calls;
-          expect(sends).toHaveLength(1);
-          expect(JSON.parse(String(sends[0]?.[0])).payload.session).toMatchObject({
-            hasActiveRun,
-            activeRunIds: hasActiveRun ? ["replacement-run"] : [],
-          });
+        if (change === "session-id") {
+          replacement.sessionId = "adopted-session";
+        } else if (change === "session-key") {
+          replacement.sessionKey = "agent:main:adopted-source";
+        } else if (change === "terminal") {
+          replacement.projectSessionActive = false;
+        } else if (change === "visibility") {
+          replacement.controlUiVisible = false;
+        } else {
+          replacement.agentId = "other";
+        }
+        connection.broadcast("sessions.changed", { sessionKey: query.key, agentId: query.agentId });
+        for (const client of clients.slice(0, 2)) {
+          const sends = vi.mocked(client.socket).send.mock.calls;
+          expect(sends).toHaveLength(2);
+          for (const [index, hasActiveRun] of [true, false].entries()) {
+            expect(JSON.parse(String(sends[index]?.[0])).payload.session).toMatchObject({
+              hasActiveRun,
+              activeRunIds: hasActiveRun ? ["replacement-run"] : [],
+            });
+          }
         }
         expect(vi.mocked(clients[2]!.socket).send.mock.calls).toHaveLength(0);
       }
@@ -528,19 +565,14 @@ it("presents current recipient roles without SQLite while rejecting source overr
       for (const client of clients) {
         vi.mocked(client.socket).send.mockClear();
       }
-      vi.mocked(clients[0]!.socket).send.mockImplementationOnce(() => {
-        joining.sessionKey = query.key;
-      });
+      joining.sessionKey = query.key;
       connection.broadcast("sessions.changed", { sessionKey: query.key, agentId: query.agentId });
-      for (const [index, activeRunIds] of [
-        [0, ["replacement-run"]],
-        [1, ["replacement-run", "unrelated-0"]],
-      ] as const) {
-        const sends = vi.mocked(clients[index]!.socket).send.mock.calls;
+      for (const client of clients.slice(0, 2)) {
+        const sends = vi.mocked(client.socket).send.mock.calls;
         expect(sends).toHaveLength(1);
         expect(JSON.parse(String(sends[0]?.[0])).payload.session).toMatchObject({
           hasActiveRun: true,
-          activeRunIds,
+          activeRunIds: ["replacement-run", "unrelated-0"],
         });
       }
       connection.chatAbortControllers.clear();

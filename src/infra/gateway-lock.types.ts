@@ -13,6 +13,7 @@ export type GatewayLockHandle = {
   releaseInTree: () => Promise<void>;
   release: () => Promise<void>;
   run<T>(operation: () => T): T;
+  markListening?: () => void;
 };
 
 export type GatewayLockOptions = {
@@ -34,6 +35,8 @@ export type GatewayLockOptions = {
   relocatedMaintenanceOwner?: GatewayLockHandle;
   /** Internal offline port recovery; validated only after acquiring fresh physical custody. */
   databasePortRecovery?: DatabasePortRecoveryIntent;
+  /** Config-only repairs retain file custody without inspecting or admitting database work. */
+  databaseAccess?: "none";
   listenerMode?: "foreground" | "supervised";
   supervisor?: GatewayOwnerSupervisor | null;
   /** Override process command-line reader (testing seam). */
