@@ -364,6 +364,7 @@ async function publishSqliteFile(
     // publication custody instead of allocating another database-sized file.
     // Public callers retain their independently mutable source and still copy it.
     let staged: FileIdentityStat & { size: bigint };
+    let transferredOwnedImage = false;
     if (consumeOwnedSource === "prepared") {
       if (options.sourcePath !== stagedPath || sourceIdentity.dev !== stagingIdentity.dev) {
         throw new Error(
@@ -406,6 +407,7 @@ async function publishSqliteFile(
         throw new Error(`SQLite snapshot staging file changed during transfer: ${stagedPath}`);
       }
       staged = { ...moved.exactIdentity, size: identity.size };
+      transferredOwnedImage = moved.method === "hardlink";
     } else {
       staged = await copyFileExclusive(
         source,
@@ -420,8 +422,12 @@ async function publishSqliteFile(
     source = undefined;
 
     await options.validatePublished?.(stagedPath);
-    const validatedContent = await hashPublishedFile(stagedPath, staged);
-    assertExpectedContent(validatedContent, expectedContent, options.targetPath);
+    // An owned hard-link transfer keeps its original digest; final publication
+    // still compares the complete image. Independently copied files need admission.
+    if (!transferredOwnedImage) {
+      const validatedContent = await hashPublishedFile(stagedPath, staged);
+      assertExpectedContent(validatedContent, expectedContent, options.targetPath);
+    }
     await options.beforePublish?.();
     if (!replacement) {
       await assertTargetAbsent(options.targetPath);
@@ -500,9 +506,6 @@ async function publishSqliteFile(
         throw error;
       }
     }
-    if (!publishedIdentity) {
-      throw new Error(`SQLite snapshot target was not published: ${options.targetPath}`);
-    }
     const initialPublishedIdentity = publishedIdentity;
     target = await fs.open(options.targetPath, "r");
     await assertOpenFileIdentity(target, options.targetPath, initialPublishedIdentity);
@@ -540,6 +543,9 @@ async function publishSqliteFile(
         assertPublishedFileIdentitySync(options.targetPath, expectedIdentity, expectedContent);
         assertSynchronousCallbackResult(finalCheck?.(), "SQLite publication final check");
         assertPublishedFileIdentitySync(options.targetPath, expectedIdentity, expectedContent);
+        // Keep the pre-hash fingerprint: later timestamp changes must miss content reuse,
+        // including when publication's FUSE recheck accepted unchanged bytes.
+        return { stat: expectedIdentity, content: publishedContent };
       },
     };
     if (options.afterPublish) {

@@ -51,6 +51,13 @@ When present, the local credential store is captured as a fixed-local resource,
 outside the engine families. User backups apply its credential sanitization;
 updater recovery captures it exactly.
 
+Existing-state reads and one-shot writes reuse a small per-worker cache of idle
+PostgreSQL connections. Each caller has exclusive use until close; an open
+transaction is never returned to the cache. Connection settings and the store
+namespace separate cache entries. Session setup runs when a backend connects,
+and an idle connection lost by the server is replaced at the next open. Workers
+close their cached connections on shutdown.
+
 ## Requirements
 
 ### Provision a database and runtime role
@@ -128,6 +135,22 @@ A store-backed SecretRef cannot bootstrap the database that holds that secret.
 The host resolves the connection before passing it to workers. Restart after
 changing the connection, prefix, or engine map; these are fixed for the process.
 An all-SQLite configuration does not resolve an unused PostgreSQL connection.
+
+Offline model credential commands, including `models auth paste-api-key`, use the
+configured engine before the Gateway starts. Supply the same DSN SecretRef to
+these commands. With PostgreSQL selected, credentials are stored on the server;
+the local database path contains an anchor rather than SQLite application state.
+
+One-shot commands such as non-interactive `onboard`, `agents add`, `models list`,
+`models status`, `config set`, and `doctor` (including `--fix`) can access
+PostgreSQL synchronously in their own CLI process. The Gateway still requires
+worker access outside synchronous admission and migrations. Interactive setup
+that can host an embedded Gateway keeps the Gateway restriction.
+
+If the connection SecretRef is unavailable, `config set`, `config patch`, and
+`config unset` can still repair paths under `database` while the Gateway is
+stopped. These repairs leave database files untouched. A batch that also changes
+other settings requires the configured database connection as usual.
 
 TLS options are DSN query parameters handled by the PostgreSQL driver, not
 additional `database.postgres` config keys. For example, the **secret value**

@@ -317,6 +317,13 @@ Existing adoption records remain preparation-only. Native activation requires ex
 control database. No `openclaw.json` option enables it. `--no-restart` keeps an
 enabled installation preparation-only for that invocation.
 
+Preparation reuses Git objects from the verified current release while fetching
+official `main`, so the network transfer contains only missing objects. A failed
+fetch retries once in the same staging repository, with a separate five-minute
+budget per attempt. Interrupted pack transfers restart the missing pack, not the
+installed history. Before building, preparation copies the reused objects into
+its own store; the prepared release retains independent Git objects.
+
 Immutable preparation requires a separately adopted build account and toolchain.
 The build account must differ from the runtime account, have no supplementary
 groups, and match the recorded numeric identity. The updater runs dependency
@@ -811,6 +818,14 @@ their own bounds. An explicit `--timeout <seconds>` supplies one overall budget 
 through activation, readiness, and recovery, including native service commands.
 Expiry reports `update-activation-timeout` or pending recovery; it does not start
 another recovery phase. Outstanding writers retain ownership until they settle.
+
+The same deadline cancels runtime-retention inventory, its file-hashing workers,
+and materialization before activation. Retention makes one attempt and stops if
+dependency discovery cannot make progress; it does not repeatedly copy a changing
+tree. If retention fails, the serving installation stays untouched. Retry after
+addressing the reported storage or dependency problem. This protection belongs
+to the installed updater, so selecting a newer candidate cannot fix an older
+updater that is already stuck in retention.
 
 After activation or rollback is verified, obsolete package and launcher backup
 trees share a five-minute cleanup budget. Expiry retains the remaining backups
