@@ -24,10 +24,7 @@ const TELEGRAM_GET_FILE_RETRY_DEADLINE_MS = 20 * 60_000;
 const TELEGRAM_GET_FILE_RETRY_ATTEMPTS = 3;
 
 type TelegramMediaContext = Pick<TelegramContext, "getFile" | "me"> & {
-  message: Pick<
-    TelegramContext["message"],
-    "photo" | "video" | "video_note" | "document" | "audio" | "voice" | "sticker" | "animation"
-  >;
+  message: NonNullable<Parameters<typeof resolveTelegramPrimaryMedia>[0]>;
 };
 
 function buildTelegramMediaSsrfPolicy(apiRoot?: string, dangerouslyAllowPrivateNetwork?: boolean) {
@@ -86,20 +83,21 @@ function resolveMediaMetadata(msg: TelegramMediaContext["message"]) {
       msg.photo?.[msg.photo.length - 1] ??
       msg.video ??
       msg.video_note ??
+      msg.animation ??
       msg.document ??
       msg.audio ??
       msg.voice,
     fileName:
+      msg.animation?.file_name ??
       msg.document?.file_name ??
       msg.audio?.file_name ??
-      msg.video?.file_name ??
-      msg.animation?.file_name,
+      msg.video?.file_name,
     mimeType:
       msg.audio?.mime_type ??
       msg.voice?.mime_type ??
       msg.video?.mime_type ??
-      msg.document?.mime_type ??
-      msg.animation?.mime_type,
+      msg.animation?.mime_type ??
+      msg.document?.mime_type,
   };
 }
 
@@ -351,7 +349,6 @@ export async function resolveMedia(params: {
     const emoji = sticker.emoji ?? cached?.emoji;
     const setName = sticker.set_name ?? cached?.setName;
     if (cached) {
-      logVerbose(`telegram: sticker cache hit for ${sticker.file_unique_id}`);
       if (fileId !== cached.fileId || emoji !== cached.emoji || setName !== cached.setName) {
         // Refresh cached sticker metadata on hits so sends/searches use latest file_id.
         await cacheSticker({ ...cached, fileId, emoji, setName });

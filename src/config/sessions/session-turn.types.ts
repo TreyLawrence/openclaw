@@ -1,3 +1,7 @@
+import type {
+  ClientVoiceRunBinding,
+  ClientVoiceSessionRecord,
+} from "../../talk/client-voice-session-store.js";
 import type { OpenClawConfig } from "../types.openclaw.js";
 import type { CliHistoryWriterFacts } from "./cli-history-boundary.js";
 import type {
@@ -6,16 +10,17 @@ import type {
 } from "./goals-operations.types.js";
 import type { SessionEntryReplacementPublication } from "./session-accessor.sqlite-entry-cache.types.js";
 import type {
-  SessionPendingInputWorkerFacts,
-  SessionPendingInputWorkerReceipt,
-} from "./session-accessor.sqlite-pending-inputs.js";
-import type {
+  ResolvedSessionTranscriptRuntimeTarget,
   SessionTranscriptTurnMessageAppend,
   SessionTranscriptWriteScope,
   SessionTranscriptTurnPersistOptions,
   TranscriptMessageAppendResult,
 } from "./session-accessor.types.js";
 import type { CapturedSessionEntryReadSource } from "./session-entry-read-source.types.js";
+import type {
+  SessionPendingInputWorkerFacts,
+  SessionPendingInputWorkerReceipt,
+} from "./session-pending-input.types.js";
 import type {
   PreparedSessionSourceAuthority,
   SessionSourcePredicate,
@@ -28,6 +33,8 @@ import type {
 } from "./session-transcript-turn-lifecycle.types.js";
 import type { SessionEntry } from "./types.js";
 export type SqliteExpectedSessionTranscriptTurnResult = {
+  runtimeTarget?: ResolvedSessionTranscriptRuntimeTarget;
+  voiceSession?: ClientVoiceSessionRecord;
   transcriptVersion?: SessionTranscriptContextVersion;
   sessionTurnMutationResult?: SessionTranscriptTurnMutationResult;
   appendedMessages: TranscriptMessageAppendResult<unknown>[];
@@ -38,6 +45,9 @@ export type SqliteExpectedSessionTranscriptTurnResult = {
 };
 
 export type SqliteSessionTurnOptions = {
+  resolveRuntimeTarget?: true;
+  /** Same-store voice bookkeeping commits atomically with its reserved transcript event. */
+  voiceTranscript?: ClientVoiceRunBinding & { failureKey: string; role: "user" | "assistant" };
   ownerSource?: PreparedSessionSourceAuthority;
   workerPrepared?: true;
   preparedGoalId?: string;
@@ -95,7 +105,6 @@ export type SessionTurnPlan = {
         freshGuard?: true;
         preparedMessage?: {
           prepared: boolean;
-          expected: { messageId: string; message: unknown } | undefined;
           message: unknown;
         };
       }
@@ -114,12 +123,4 @@ export type SessionTurnCommitted = {
   custody?: SessionPendingInputWorkerReceipt;
   authority?: import("./session-pending-input-authority.js").SessionPendingInputAuthorityFacts;
   publication?: SessionEntryReplacementPublication;
-};
-
-export type IncognitoSessionTurnOperations = {
-  "session.turn.prepare": {
-    input: SessionTurnPlan;
-    output: ReturnType<typeof import("./session-turn.worker.js").prepareSessionTurn>;
-  };
-  "session.turn.commit": { input: SessionTurnPlan; output: SessionTurnCommitted };
 };

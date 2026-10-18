@@ -1,4 +1,3 @@
-import type { DatabaseSync } from "node:sqlite";
 import {
   readSandboxBrowserRegistryInDatabase,
   readSandboxRegistryEntryInDatabase,
@@ -12,15 +11,13 @@ import {
   readWorkerEnvironmentFacts,
   readWorkerEnvironmentPrunePage,
 } from "../gateway/worker-environments/store-row-codec.js";
+import type { EngineConnection } from "../infra/sql-connection.js";
 import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js";
 import { readAgentDeletionJournalStatusInDatabase } from "./agent-deletion-journal.read.js";
-import type {
-  OpenClawStateReadCommand,
-  OpenClawStateReadResult,
-} from "./openclaw-state-read.types.js";
+import type { OpenClawStateReadCommand } from "./openclaw-state-read.types.js";
 
 export function readStateRegistryCommand(
-  db: DatabaseSync,
+  db: EngineConnection,
   command: Extract<
     OpenClawStateReadCommand,
     {
@@ -30,14 +27,13 @@ export function readStateRegistryCommand(
         | "workerEnvironments.pruneCandidates"
         | "agentDeletionJournal.status"
         | "worktrees.cleanupState"
-        | "worktrees.list"
         | "sandboxRegistry.list"
         | "sandboxRegistry.get"
         | "sandboxRegistry.runtimeIds"
         | "sandboxRegistry.browsers";
     }
   >,
-): OpenClawStateReadResult {
+) {
   if (command.type === "preparedPoolPresence.read") {
     return { type: command.type, demand: readPreparedPoolPresenceDemandInDatabase(db) };
   }
@@ -79,12 +75,9 @@ export function readStateRegistryCommand(
   if (command.type === "sandboxRegistry.browsers") {
     return { type: command.type, entries: readSandboxBrowserRegistryInDatabase(db) };
   }
-  if (command.type === "worktrees.cleanupState") {
-    return {
-      type: command.type,
-      records: listRegistryWorktreesInDatabase(db),
-      leases: readWorktreeRunLeaseStateInDatabase(db),
-    };
-  }
-  return { type: command.type, records: listRegistryWorktreesInDatabase(db) };
+  return {
+    type: command.type,
+    records: listRegistryWorktreesInDatabase(db),
+    leases: readWorktreeRunLeaseStateInDatabase(db),
+  };
 }

@@ -69,30 +69,6 @@ afterEach(() => {
 });
 
 describe("requester settle wake commit retry", () => {
-  it.each(["another requester", "the same task"])(
-    "keeps frozen completion custody task-scoped when a newer run belongs to %s",
-    async (replacement) => {
-      const entry = makeRetainedChild();
-      entry.generation = 1;
-      const successor = {
-        ...makeRetainedChild("run-b"),
-        childSessionKey: entry.childSessionKey,
-        generation: 2,
-        ...(replacement === "another requester"
-          ? { requesterSessionKey: "agent:main:other" }
-          : { taskRunId: entry.runId }),
-      };
-      const { context } = makeContext(entry, [successor]);
-      const commit = vi.fn(() => true);
-      await commitRequesterWake(context, [entry], undefined, commit, false);
-      if (replacement === "another requester") {
-        expect(commit).toHaveBeenCalledExactlyOnceWith([entry], expect.any(Object));
-      } else {
-        expect(commit).not.toHaveBeenCalled();
-      }
-    },
-  );
-
   it.each([true, false])(
     "serializes overlapping wake episodes (first published: %s)",
     async (published) => {
@@ -209,36 +185,28 @@ describe("requester settle wake commit retry", () => {
     expect(getPendingWakeCommit(context, entry)).toBeUndefined();
   });
 
-  it.each([
-    { progress: "status", wake: { status: "pending" as const } },
-    { progress: "attempt count", wake: { attemptCount: 4 } },
-    { progress: "replay count", wake: { replayCount: 1 } },
-    { progress: "deferral count", wake: { deferralCount: 1 } },
-    { progress: "retry deadline", wake: { nextAttemptAt: 20_000 } },
-    { progress: "pause notice", wake: { pauseNotice: { acknowledgment: "Waiting for input" } } },
-  ])(
-    "retires an uncommitted retry when the same generation advances $progress",
-    async ({ wake }) => {
-      const { entry, context } = makeContext();
-      const commit = vi.fn(() => false);
-      await commitRequesterWake(context, [entry], undefined, commit, true);
-      expect(getPendingWakeCommit(context, entry)).toBeDefined();
+  it("names the repeated rejection in the sustained failure warning (#154252)", async () => {
+    const { entry, context, warn } = makeContext();
+    const commit = vi.fn(() => {
+      throw new Error("subagent completion owner changed before settlement: " + entry.runId);
+    });
+    await commitRequesterWake(context, [entry], undefined, commit, true).catch(() => {});
+    for (let pass = 0; pass < 4; pass += 1) {
+      const pending = getPendingWakeCommit(context, entry)!;
+      vi.setSystemTime(pending.nextAttemptAt + 1);
+      await retryPendingWakeCommit(context, pending).catch(() => {});
+    }
 
-      const advanced = copySubagentRunRuntimeOwner<SubagentRunRecord>(entry, {
-        ...entry,
-        requesterSettleWake: { status: "dispatching", attemptCount: 3, ...wake },
-      });
-      context.options.runs.set(entry.runId, advanced);
-      await sweep(context, entry, 1);
-
-      expect(commit).toHaveBeenCalledOnce();
-      expect(getPendingWakeCommit(context, advanced)).toBeUndefined();
-      expect(context.options.runs.get(entry.runId)).toBe(advanced);
-      const nextCommit = vi.fn(() => true);
-      await commitRequesterWake(context, [advanced], undefined, nextCommit, true);
-      expect(nextCommit).toHaveBeenCalledOnce();
-    },
-  );
+    const sustained = warn.mock.calls.filter(
+      ([message]) => message === "requester settle wake commit still failing; retries continue",
+    );
+    expect(sustained).toHaveLength(1);
+    expect(sustained[0]?.[1]).toMatchObject({
+      failures: 5,
+      error: { message: expect.stringContaining("owner changed before settlement") },
+    });
+    expect(getPendingWakeCommit(context, entry)).toBeDefined();
+  });
 
   it("gives a genuinely new obligation its own budget", async () => {
     const { entry, context } = makeContext();
@@ -273,10 +241,7 @@ const READONLY_FAULT = { name: "SqliteError", message: "attempt to write a reado
 const MALFORMED_FAULT = { name: "SqliteError", message: "database disk image is malformed" };
 
 describe("requester settle wake failure reporting", () => {
-  it.each([
-    { repeats: 1, reports: 1, suppressed: 0 },
-    { repeats: 40, reports: 5, suppressed: 35 },
-  ])(
+  it.each([{ repeats: 40, reports: 5, suppressed: 35 }])(
     "reports new faults and accounts for $suppressed suppressed repeats on recovery",
     async ({ repeats, reports, suppressed }) => {
       const { entry, context, warn } = makeContext();

@@ -26,24 +26,29 @@ import {
 } from "./attempt-nested-tool-activity.js";
 import { prepareEmbeddedAttemptStream } from "./attempt-stream-prepare.js";
 
+type StreamInput = Parameters<typeof prepareEmbeddedAttemptStream>[0];
+const idleRunState = {
+  aborted: false,
+  promptError: undefined,
+  timedOut: false,
+  yieldDetected: false,
+};
+
 export function prepareCatalogExecutor(options?: {
+  diagnosticOwner?: StreamInput["diagnosticOwner"];
+  getRunState?: StreamInput["getRunState"];
+  runAbortController?: AbortController;
+  abortRun?: StreamInput["abortRun"];
+  markExternalAbort?: StreamInput["markExternalAbort"];
+  recoverStalledModelCall?: StreamInput["recoverStalledModelCall"];
   activeSession?: AgentSession;
   sessionManager?: SessionManager;
-  hookRunner?: Parameters<typeof prepareEmbeddedAttemptStream>[0]["agentSession"]["hookRunner"];
-  attempt?: Partial<Parameters<typeof prepareEmbeddedAttemptStream>[0]["attempt"]>;
-  getRunState?: () => {
-    aborted: boolean;
-    promptError: unknown;
-    timedOut: boolean;
-    yieldDetected: boolean;
-  };
-  runAbortController?: AbortController;
+  hookRunner?: StreamInput["agentSession"]["hookRunner"];
+  attempt?: Partial<StreamInput["attempt"]>;
   sandboxSessionKey?: string;
   sessionKey?: string;
   replyOperation?: ReplyOperation;
   onAttemptAbort?: () => void;
-  abortRun?: (isTimeout?: boolean, reason?: unknown) => void;
-  markExternalAbort?: () => void;
   toolProgressDetail?: "explain" | "raw";
   onAgentEvent?: (event: { stream: string; data: Record<string, unknown> }) => void;
   trustedLocalMediaToolNames?: ReadonlySet<string>;
@@ -86,23 +91,19 @@ export function prepareCatalogExecutor(options?: {
     },
     hookAgentId: "main",
     diagnosticTrace: {} as never,
-    diagnosticOwner: createDiagnosticEmbeddedRunOwner({
-      sessionId: "session-output-schema",
-      runId: "run-output-schema",
-    }),
+    diagnosticOwner:
+      options?.diagnosticOwner ??
+      createDiagnosticEmbeddedRunOwner({
+        sessionId: "session-output-schema",
+        runId: "run-output-schema",
+      }),
     nestedToolActivityState,
     isReplaySafeTool: () => false,
     runAbortController,
     abortRun: options?.abortRun ?? vi.fn(),
     markExternalAbort: options?.markExternalAbort ?? vi.fn(),
-    getRunState:
-      options?.getRunState ??
-      (() => ({
-        aborted: false,
-        promptError: undefined,
-        timedOut: false,
-        yieldDetected: false,
-      })),
+    recoverStalledModelCall: options?.recoverStalledModelCall,
+    getRunState: options?.getRunState ?? (() => ({ ...idleRunState })),
     onBlockReply: options?.streamReplies === false ? undefined : vi.fn(),
     onBlockReplyFlush: options?.streamReplies === false ? undefined : vi.fn(),
   });
@@ -144,7 +145,7 @@ export async function createHeldSettlementSession() {
     resourceLoader: createResourceLoader(new Map([["agent_settled", [holdSettlement]]])),
   });
   streamMocks.streamSimple.mockImplementation((model) =>
-    createAssistantResultStream(createAssistant(model, [{ type: "text", text: "Done." }])),
+    createAssistantResultStream(createAssistant(model, "Done.")),
   );
   return { session, settled, releaseSettlement };
 }
@@ -208,25 +209,20 @@ export function createCatalogSubscription() {
     unsubscribe: vi.fn(),
     toolMetas: [],
     runToolLifecycle: vi.fn(async ({ args, execute, onTerminal }) => {
+      const terminal = (result: Parameters<typeof prepareToolResult>[0], isError: boolean) =>
+        onTerminal?.({
+          result,
+          readSanitizedResult: prepareToolResult(result),
+          isError,
+          executedArguments: structuredClone(args),
+          effectReceipt: { state: "uncertain" },
+        });
       try {
         const result = await execute(() => undefined);
-        await onTerminal?.({
-          result,
-          readSanitizedResult: prepareToolResult(result),
-          isError: isToolResultError(result),
-          executedArguments: structuredClone(args),
-          effectReceipt: { state: "uncertain" },
-        });
+        await terminal(result, isToolResultError(result));
         return result;
       } catch (error) {
-        const result = buildToolLifecycleErrorResult(error);
-        await onTerminal?.({
-          result,
-          readSanitizedResult: prepareToolResult(result),
-          isError: true,
-          executedArguments: structuredClone(args),
-          effectReceipt: { state: "uncertain" },
-        });
+        await terminal(buildToolLifecycleErrorResult(error), true);
         throw error;
       }
     }),
@@ -254,12 +250,8 @@ export async function observeTerminalRunActivity(
         status: "running",
         createdAt: 1,
         taskKind: "image_generation",
-        sourceId: "image_generate:terminal",
         requesterSessionKey: sessionKey,
         runId: "tool:image_generate:terminal",
-        task: "finish image before releasing run",
-        startedAt: 1,
-        lastEventAt: 1,
       });
     }
     const terminalEvents: Array<{ phase: unknown; active: boolean }> = [];
@@ -267,12 +259,7 @@ export async function observeTerminalRunActivity(
       activeSession: session,
       sessionKey,
       runAbortController,
-      getRunState: () => ({
-        aborted: cancelled,
-        promptError: undefined,
-        timedOut: false,
-        yieldDetected: false,
-      }),
+      getRunState: () => ({ ...idleRunState, aborted: cancelled }),
       attempt: deferred
         ? { deferTerminalLifecycle: true, onDeferredLifecycleOwner: () => {} }
         : undefined,
@@ -301,7 +288,7 @@ export async function observeTerminalRunActivity(
       try {
         await prepared.subscription.waitForPendingEvents();
       } finally {
-        prepared.deferredLifecycleOwner?.discard();
+        await prepared.deferredLifecycleOwner?.discard();
         prepared.subscription.unsubscribe();
         const { clearActiveEmbeddedRun } =
           await vi.importActual<typeof import("../runs.js")>("../runs.js");

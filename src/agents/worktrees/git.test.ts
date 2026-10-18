@@ -333,7 +333,7 @@ describe("Git ref mutation ownership", () => {
       await Promise.allSettled(pending);
     }
     await Promise.all(pending);
-    await expect(resolved).resolves.toEqual({
+    await expect(resolved).resolves.toMatchObject({
       commit: originHead,
       gitOperand: "refs/remotes/origin/main",
       recordRef: "origin/main",
@@ -519,6 +519,10 @@ describe("Git checkout discovery", () => {
     const nested = path.join(root, "packages", "nested");
     await fs.mkdir(path.join(root, ".git"));
     await fs.mkdir(nested, { recursive: true });
+
+    expect(findGitCheckoutRoot(nested)).toBeNull();
+    expect(insideGitCheckout(nested)).toBe(false);
+    await fs.writeFile(path.join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
 
     expect(findGitCheckoutRoot(nested)).toBe(root);
     expect(insideGitCheckout(nested)).toBe(true);

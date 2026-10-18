@@ -1,4 +1,3 @@
-// Bundled Plugin Build Entries tests cover bundled plugin build entries script behavior.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -8,8 +7,8 @@ import {
   collectPluginDeclarationSourceEntries,
   collectRootPackageExcludedExtensionDirs,
   collectSourceCheckoutPluginBuildEntries,
+  collectBundledPluginBuildEntries,
   DOCKER_SELECTED_PLUGIN_BUILD_IDS_ENV,
-  listBundledPluginBuildEntries,
   listBundledPluginPackArtifacts,
 } from "../../scripts/lib/bundled-plugin-build-entries.mjs";
 import { resolvePluginNpmRuntimeBuildPlan } from "../../scripts/lib/plugin-npm-runtime-build.mts";
@@ -18,6 +17,28 @@ import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
+function write(root: string, name: string, contents: unknown = "export {};\n") {
+  const target = path.join(root, name);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, typeof contents === "string" ? contents : JSON.stringify(contents));
+}
+
+function excludedPluginFixture(prefix: string) {
+  const cwd = tempDirs.make(prefix);
+  write(cwd, "package.json", { files: ["dist/**", "!dist/extensions/external-owner/**"] });
+  return {
+    cwd,
+    writePlugin: (name: string, contents: unknown) =>
+      write(cwd, `extensions/external-owner/${name}`, contents),
+  };
+}
+
+function collectBuildSources(params?: Parameters<typeof collectBundledPluginBuildEntries>[0]) {
+  return collectBundledPluginBuildEntries(params).flatMap(({ id, sourceEntries }) =>
+    sourceEntries.map((entry) => path.posix.join("extensions", id, entry)),
+  );
+}
+
 function expectNoPrefixMatches(values: string[], prefix: string) {
   expect(values.filter((value) => value.startsWith(prefix))).toEqual([]);
 }
@@ -25,34 +46,30 @@ function expectNoPrefixMatches(values: string[], prefix: string) {
 describe("bundled plugin build entries", () => {
   it("preserves tracked entry names and ignores deleted or untracked plugin inputs", () => {
     const cwd = tempDirs.make("openclaw-tracked-plugin-entries-");
-    const write = (name: string, contents = "export {};\n") => {
-      const target = path.join(cwd, name);
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.writeFileSync(target, contents);
-    };
-    write("package.json", JSON.stringify({ name: "openclaw", files: ["dist/**"] }));
+    const writeFile = (name: string, contents?: unknown) => write(cwd, name, contents);
+    writeFile("package.json", { name: "openclaw", files: ["dist/**"] });
     const names = [
       " leading-space.ts",
       "café.ts",
       "index.ts",
       ...(process.platform === "win32" ? [] : ["line\nbreak.ts", "literal\\backslash.ts"]),
     ];
-    write("extensions/demo/openclaw.plugin.json", JSON.stringify({ id: "demo" }));
-    write(
-      "extensions/demo/package.json",
-      JSON.stringify({ name: "@openclaw/demo", openclaw: { extensions: ["./index.ts"] } }),
-    );
+    writeFile("extensions/demo/openclaw.plugin.json", { id: "demo" });
+    writeFile("extensions/demo/package.json", {
+      name: "@openclaw/demo",
+      openclaw: { extensions: ["./index.ts"] },
+    });
     for (const name of [...names, "deleted.ts", "probe.test.ts", "types.d.ts"]) {
-      write(`extensions/demo/${name}`);
+      writeFile(`extensions/demo/${name}`);
     }
-    write("extensions/demo/src/private.ts");
-    write("extensions/nested-only/src/private.ts");
-    write("extensions/gone/src/deleted.ts");
-    write(
+    writeFile("extensions/demo/src/private.ts");
+    writeFile("extensions/nested-only/src/private.ts");
+    writeFile("extensions/gone/src/deleted.ts");
+    writeFile(
       "extensions/deleted-metadata/openclaw.plugin.json",
       JSON.stringify({ id: "deleted-metadata" }),
     );
-    write("extensions/deleted-metadata/index.ts");
+    writeFile("extensions/deleted-metadata/index.ts");
     execFileSync("git", ["init", "--quiet", cwd]);
     execFileSync("git", ["-C", cwd, "add", "--", "extensions"]);
     for (const name of [
@@ -62,9 +79,9 @@ describe("bundled plugin build entries", () => {
     ]) {
       fs.unlinkSync(path.join(cwd, name));
     }
-    write("extensions/demo/untracked.ts");
-    write("extensions/untracked/openclaw.plugin.json", JSON.stringify({ id: "untracked" }));
-    write("extensions/untracked/index.ts");
+    writeFile("extensions/demo/untracked.ts");
+    writeFile("extensions/untracked/openclaw.plugin.json", { id: "untracked" });
+    writeFile("extensions/untracked/index.ts");
 
     const params = { cwd, env: { [DOCKER_SELECTED_PLUGIN_BUILD_IDS_ENV]: "nested-only" } };
     const entries = collectSourceCheckoutPluginBuildEntries(params);
@@ -77,7 +94,7 @@ describe("bundled plugin build entries", () => {
     ];
     expect(entries.map(({ id }) => id)).toEqual(["demo"]);
     expect(entries[0]?.sourceEntries).toEqual(expectedSources);
-    expect(Object.values(listBundledPluginBuildEntries(params))).toEqual(
+    expect(collectBuildSources(params)).toEqual(
       expectedSources.map((name) => `extensions/demo/${name.slice(2)}`),
     );
     expect(() =>
@@ -111,67 +128,35 @@ describe("bundled plugin build entries", () => {
   });
 
   it("retains manifest-owned config repairs independently of runtime package exclusions", () => {
-    const cwd = tempDirs.make("openclaw-config-doctor-entries-");
-    const pluginDir = path.join(cwd, "extensions", "external-owner");
-    fs.mkdirSync(pluginDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(cwd, "package.json"),
-      JSON.stringify({
-        files: ["dist/**", "!dist/extensions/external-owner/**"],
-      }),
-    );
-    fs.writeFileSync(
-      path.join(pluginDir, "package.json"),
-      JSON.stringify({
-        name: "@openclaw/external-owner",
-        openclaw: { build: { bundledDist: false } },
-      }),
-    );
+    const { cwd, writePlugin } = excludedPluginFixture("openclaw-config-doctor-entries-");
+    writePlugin("package.json", {
+      name: "@openclaw/external-owner",
+      openclaw: { build: { bundledDist: false } },
+    });
     const manifest = {
       id: "external-owner",
       channels: ["renamed-channel"],
       doctorContract: { configRepair: true, stateMigrations: true },
     };
-    const manifestPath = path.join(pluginDir, "openclaw.plugin.json");
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    writePlugin("openclaw.plugin.json", manifest);
     expect(() => collectRetainedDoctorBuildEntries({ cwd })).toThrow(
       /Missing config-only doctor entrypoint/,
     );
-    fs.writeFileSync(
-      path.join(pluginDir, "config-doctor-api.ts"),
-      "export const legacyConfigRules = [];\n",
-    );
+    writePlugin("config-doctor-api.ts", "export const legacyConfigRules = [];\n");
     expect(collectRetainedDoctorBuildEntries({ cwd })).toEqual({
       "renamed-channel": "extensions/external-owner/config-doctor-api.ts",
     });
-    fs.writeFileSync(
-      manifestPath,
-      JSON.stringify({ ...manifest, doctorContract: { stateMigrations: true } }),
-    );
+    writePlugin("openclaw.plugin.json", { ...manifest, doctorContract: { stateMigrations: true } });
     expect(collectRetainedDoctorBuildEntries({ cwd })).toEqual({});
   });
 
   it("retains non-channel state checks under plugin IDs while excluding plugin runtimes", () => {
-    const cwd = tempDirs.make("openclaw-state-retention-entries-");
-    const pluginDir = path.join(cwd, "extensions", "external-owner");
-    fs.mkdirSync(pluginDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(cwd, "package.json"),
-      JSON.stringify({
-        files: ["dist/**", "!dist/extensions/external-owner/**"],
-      }),
-    );
-    fs.writeFileSync(
-      path.join(pluginDir, "openclaw.plugin.json"),
-      JSON.stringify({
-        id: "external-owner",
-        doctorContract: { stateMigrations: [{ id: "retired-log" }] },
-      }),
-    );
-    fs.writeFileSync(
-      path.join(pluginDir, "state-retention-api.ts"),
-      "export const stateMigrations = [];\n",
-    );
+    const { cwd, writePlugin } = excludedPluginFixture("openclaw-state-retention-entries-");
+    writePlugin("openclaw.plugin.json", {
+      id: "external-owner",
+      doctorContract: { stateMigrations: [{ id: "retired-log" }] },
+    });
+    writePlugin("state-retention-api.ts", "export const stateMigrations = [];\n");
     expect(collectRetainedDoctorBuildEntries({ cwd, surface: "state-retention" })).toEqual({
       "external-owner": "extensions/external-owner/state-retention-api.ts",
     });
@@ -203,13 +188,7 @@ describe("bundled plugin build entries", () => {
   };
 
   it("includes the manifest-less runtime core support package in dist build entries", () => {
-    const entries = listBundledPluginBuildEntries();
-    const expectedEntries = {
-      "extensions/image-generation-core/runtime-api":
-        "extensions/image-generation-core/runtime-api.ts",
-    };
-
-    expect(entries).toMatchObject(expectedEntries);
+    expect(collectBuildSources()).toContain("extensions/image-generation-core/runtime-api.ts");
   });
 
   it("packs the runtime core support package without requiring a plugin manifest", () => {
@@ -237,9 +216,9 @@ describe("bundled plugin build entries", () => {
   );
 
   it("keeps the Matrix packaged runtime shim in its package-owned build", () => {
-    const entries = listBundledPluginBuildEntries();
+    const entryKeys = collectBuildSources().map((source) => source.replace(/\.[^.]+$/u, ""));
     const plan = resolvePluginNpmRuntimeBuildPlan({ packageDir: "extensions/matrix" });
-    expect(entries["extensions/matrix/plugin-entry.handlers.runtime"]).toBeUndefined();
+    expect(entryKeys).not.toContain("extensions/matrix/plugin-entry.handlers.runtime");
     expect(plan?.entry["plugin-entry.handlers.runtime"]).toBe(
       path.resolve("extensions/matrix/plugin-entry.handlers.runtime.ts"),
     );
@@ -247,16 +226,18 @@ describe("bundled plugin build entries", () => {
   });
 
   it("keeps Codex CLI metadata in bundled build and standalone pack entries", () => {
-    const entries = listBundledPluginBuildEntries();
+    const sources = collectBuildSources();
     const artifacts = listBundledPluginPackArtifacts({ includeRootPackageExcludedDirs: true });
+    const sourceEntry = collectSourceCheckoutPluginBuildEntries().find(({ id }) => id === "codex");
 
-    expect(entries["extensions/codex/cli-metadata"]).toBe("extensions/codex/cli-metadata.ts");
+    expect(sources).toContain("extensions/codex/cli-metadata.ts");
     expect(artifacts).toContain("dist/extensions/codex/cli-metadata.js");
+    expect(sourceEntry).toMatchObject({ isolated: true, runtimeExtension: ".js" });
   });
 
   it("rejects unknown bounded bundled plugin build ids", () => {
     expect(() =>
-      listBundledPluginBuildEntries({
+      collectBundledPluginBuildEntries({
         env: {
           ...process.env,
           OPENCLAW_BUNDLED_PLUGIN_BUILD_IDS: "missing-plugin",
@@ -268,17 +249,16 @@ describe("bundled plugin build entries", () => {
   });
 
   it("keeps the Telegram ingress worker out of bundled plugin public-surface entries", () => {
-    const entries = listBundledPluginBuildEntries();
-
-    expect(entries["extensions/telegram/telegram-ingress-worker.runtime"]).toBeUndefined();
+    const entryKeys = collectBuildSources().map((source) => source.replace(/\.[^.]+$/u, ""));
+    expect(entryKeys).not.toContain("extensions/telegram/telegram-ingress-worker.runtime");
   });
 
   it("keeps top-level bundled plugin test helpers out of public-surface entries", () => {
-    const entries = listBundledPluginBuildEntries();
+    const entryKeys = collectBuildSources().map((source) => source.replace(/\.[^.]+$/u, ""));
 
-    expect(entries["extensions/browser/test-support"]).toBeUndefined();
-    expect(entries["extensions/comfy/test-helpers"]).toBeUndefined();
-    expect(entries["extensions/minimax/provider-http.test-helpers"]).toBeUndefined();
+    expect(entryKeys).not.toContain("extensions/browser/test-support");
+    expect(entryKeys).not.toContain("extensions/comfy/test-helpers");
+    expect(entryKeys).not.toContain("extensions/minimax/provider-http.test-helpers");
   });
 
   it("discovers repo plugin build entries without directory scans", () => {
@@ -288,11 +268,11 @@ describe("bundled plugin build entries", () => {
     }>(
       `
         const build = await import("./scripts/lib/bundled-plugin-build-entries.mjs");
-        const entries = build.listBundledPluginBuildEntries();
+        const entries = build.collectBundledPluginBuildEntries();
         const artifacts = build.listBundledPluginPackArtifacts();
         return {
           artifacts: artifacts.length,
-          entries: Object.keys(entries).length,
+          entries: entries.reduce((count, entry) => count + entry.sourceEntries.length, 0),
         };
       `,
       { counters: ["readdirSync"] },
@@ -309,28 +289,26 @@ describe("bundled plugin build entries", () => {
       ...baselineEnv,
       [DOCKER_SELECTED_PLUGIN_BUILD_IDS_ENV]: "slack clickclack,slack,msteams,whatsapp",
     };
-    const entries = listBundledPluginBuildEntries({ env: dockerEnv });
+    const sources = collectBuildSources({ env: dockerEnv });
     const baselineArtifacts = listBundledPluginPackArtifacts({ env: baselineEnv });
     const artifacts = listBundledPluginPackArtifacts({ env: dockerEnv });
-    const reorderedEntries = listBundledPluginBuildEntries({
+    const reorderedSources = collectBuildSources({
       env: {
         ...baselineEnv,
         [DOCKER_SELECTED_PLUGIN_BUILD_IDS_ENV]: "whatsapp,msteams,clickclack slack",
       },
     });
-    const entryKeys = Object.keys(entries);
-
-    expect(entries["extensions/clickclack/index"]).toBe("extensions/clickclack/index.ts");
-    expect(entries["extensions/slack/index"]).toBe("extensions/slack/index.ts");
-    expect(entries["extensions/slack/setup-entry"]).toBe("extensions/slack/setup-entry.ts");
-    expect(entries["extensions/msteams/index"]).toBe("extensions/msteams/index.ts");
-    expect(entries["extensions/whatsapp/index"]).toBe("extensions/whatsapp/index.ts");
-    expect(entries["extensions/whatsapp/setup-entry"]).toBe("extensions/whatsapp/setup-entry.ts");
-    expect(entries["extensions/clawrouter/index"]).toBe("extensions/clawrouter/index.ts");
-    expect(entryKeys.findIndex((entry) => entry.startsWith("extensions/clickclack/"))).toBeLessThan(
-      entryKeys.findIndex((entry) => entry.startsWith("extensions/slack/")),
+    expect(sources).toContain("extensions/clickclack/index.ts");
+    expect(sources).toContain("extensions/slack/index.ts");
+    expect(sources).toContain("extensions/slack/setup-entry.ts");
+    expect(sources).toContain("extensions/msteams/index.ts");
+    expect(sources).toContain("extensions/whatsapp/index.ts");
+    expect(sources).toContain("extensions/whatsapp/setup-entry.ts");
+    expect(sources).toContain("extensions/clawrouter/index.ts");
+    expect(sources.findIndex((entry) => entry.startsWith("extensions/clickclack/"))).toBeLessThan(
+      sources.findIndex((entry) => entry.startsWith("extensions/slack/")),
     );
-    expect(Object.keys(reorderedEntries)).toEqual(entryKeys);
+    expect(reorderedSources).toEqual(sources);
     expect(artifacts).toEqual(baselineArtifacts);
     expectNoPrefixMatches(artifacts, "dist/extensions/clickclack/");
     expectNoPrefixMatches(artifacts, "dist/extensions/msteams/");
@@ -368,19 +346,17 @@ describe("bundled plugin build entries", () => {
       .mockImplementationOnce(() => unsortedDirents as never);
     try {
       expect(
-        Object.keys(
-          listBundledPluginBuildEntries({
-            cwd: repoDir,
-            env: {
-              ...process.env,
-              [DOCKER_SELECTED_PLUGIN_BUILD_IDS_ENV]: "slack,msteams,clickclack",
-            },
-          }),
-        ),
+        collectBuildSources({
+          cwd: repoDir,
+          env: {
+            ...process.env,
+            [DOCKER_SELECTED_PLUGIN_BUILD_IDS_ENV]: "slack,msteams,clickclack",
+          },
+        }),
       ).toEqual([
-        "extensions/clickclack/index",
-        "extensions/msteams/index",
-        "extensions/slack/index",
+        "extensions/clickclack/index.ts",
+        "extensions/msteams/index.ts",
+        "extensions/slack/index.ts",
       ]);
     } finally {
       readdirSpy.mockRestore();
@@ -399,7 +375,7 @@ describe("bundled plugin build entries", () => {
       ],
     ] as const) {
       expect(() =>
-        listBundledPluginBuildEntries({
+        collectBundledPluginBuildEntries({
           env: {
             ...process.env,
             [DOCKER_SELECTED_PLUGIN_BUILD_IDS_ENV]: selection,

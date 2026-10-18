@@ -2,9 +2,9 @@ import {
   CHARS_PER_TOKEN_ESTIMATE,
   estimateStringChars,
 } from "@openclaw/normalization-core/cjk-chars";
+import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import type { EmbeddingInput } from "./embedding-inputs.js";
-import { hashText } from "./hash.js";
 import type { MemoryEntryProvenance } from "./types.js";
 
 export type MemoryChunk = {
@@ -19,7 +19,7 @@ export type MemoryChunk = {
 };
 
 // Persisted with index metadata so boundary changes rebuild unchanged files.
-export const MEMORY_CHUNKING_VERSION = 5;
+export const MEMORY_CHUNKING_VERSION = 6;
 
 type CuratedMarkdownEntry = {
   startLine: number;
@@ -96,7 +96,7 @@ export function chunkMarkdown(
       startLine,
       endLine,
       text,
-      hash: hashText(text),
+      hash: sha256Hex(text),
       embeddingInput: { text },
     });
   };

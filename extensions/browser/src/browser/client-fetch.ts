@@ -5,21 +5,17 @@
  * in-process dispatcher, adding loopback auth and operator-facing diagnostics.
  */
 import { parseBrowserHttpUrl } from "openclaw/plugin-sdk/browser-cdp";
-import {
-  extractErrorCode,
-  formatErrorMessage,
-  toErrorObject,
-} from "openclaw/plugin-sdk/error-runtime";
+import { extractErrorCode, formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { resolveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
 import { readResponseWithLimit } from "openclaw/plugin-sdk/response-limit-runtime";
-import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
+import { readRuntimeConfig as getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { formatCliCommand } from "openclaw/plugin-sdk/setup-tools";
 import { fetchWithSsrFGuard, isLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
 import {
   normalizeOptionalString,
   normalizeLowercaseStringOrEmpty,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { racePromiseWithAbortSignal } from "openclaw/plugin-sdk/time-runtime";
+import { withTimeout } from "../sdk-node-runtime.js";
 import { getBridgeAuthForPort } from "./bridge-auth-registry.js";
 import { resolveBrowserConfig, resolveProfile } from "./config.js";
 import { resolveBrowserControlAuth } from "./control-auth.js";
@@ -148,7 +144,7 @@ function decodeBrowserControlResponseUtf8(body: Uint8Array, status: number): str
 
 function resolveBrowserFetchOperatorHint(url: string): string {
   if (isAbsoluteHttp(url)) {
-    return "If this is a sandboxed session, ensure the sandbox browser is running.";
+    return "If this is a sandboxed session, check that the sandbox browser is running.";
   }
   try {
     const cfg = getRuntimeConfig();
@@ -212,16 +208,10 @@ function classifyBrowserFetchFailure(err: unknown): BrowserFetchFailureKind {
     return "transient-network";
   }
   const looksLikeAbort =
-    detailLower.includes("aborterror") ||
-    detailLower.includes("aborted") ||
     detailLower.includes("abort") ||
     detailLower.includes("cancelled") ||
     detailLower.includes("canceled");
   return looksLikeAbort ? "aborted" : "persistent";
-}
-
-function isPersistentBrowserServiceFailure(message: string, status: number | undefined): boolean {
-  return status === 401 || BROWSER_PERSISTENT_FAILURE_RE.test(message);
 }
 
 function resolveBrowserServiceModelHint(
@@ -234,7 +224,7 @@ function resolveBrowserServiceModelHint(
   if (message.includes(BROWSER_TOOL_TRANSIENT_MODEL_HINT)) {
     return BROWSER_TOOL_TRANSIENT_MODEL_HINT;
   }
-  if (isPersistentBrowserServiceFailure(message, status)) {
+  if (status === 401 || BROWSER_PERSISTENT_FAILURE_RE.test(message)) {
     return BROWSER_TOOL_PERSISTENT_MODEL_HINT;
   }
   if (status === 408 || status === 504) {
@@ -244,9 +234,7 @@ function resolveBrowserServiceModelHint(
     return undefined;
   }
   const kind = classifyBrowserFetchFailure(new Error(message));
-  return kind === "timeout" || kind === "transient-network"
-    ? BROWSER_TOOL_TRANSIENT_MODEL_HINT
-    : undefined;
+  return kind === "persistent" ? undefined : resolveBrowserToolModelHint(kind);
 }
 
 function resolveBrowserToolModelHint(kind: BrowserFetchFailureKind): string | undefined {
@@ -305,9 +293,9 @@ function createBrowserRequestAbort(timeoutMs: number, upstreamSignal?: AbortSign
 
 async function fetchHttpJson<T>(
   url: string,
-  init: RequestInit & { timeoutMs?: number },
+  init: RequestInit & { timeoutMs: number },
 ): Promise<T> {
-  const timeoutMs = resolveTimerTimeoutMs(init.timeoutMs, 5000);
+  const { timeoutMs } = init;
   const abort = createBrowserRequestAbort(timeoutMs, init.signal);
   const { signal } = abort;
   let release: (() => Promise<void>) | undefined;
@@ -394,26 +382,25 @@ export async function fetchBrowserJson<T>(
       }
     }
 
-    const abort = createBrowserRequestAbort(timeoutMs, init?.signal);
-    const { signal } = abort;
-
-    const dispatchPromise = dispatchBrowserControlRequest({
-      method:
-        init?.method?.toUpperCase() === "DELETE"
-          ? "DELETE"
-          : init?.method?.toUpperCase() === "POST"
-            ? "POST"
-            : "GET",
-      path: parsed.pathname,
-      query,
-      body,
-      signal,
-      ...(scope ? { assertCurrent: scope.assertCurrent } : {}),
-    });
-
-    const result = await racePromiseWithAbortSignal(dispatchPromise, signal, ({ reason }) =>
-      toErrorObject(reason ?? new Error("aborted"), "Non-Error rejection"),
-    ).finally(abort.dispose);
+    const result = await withTimeout(
+      (signal) =>
+        dispatchBrowserControlRequest({
+          method:
+            init?.method?.toUpperCase() === "DELETE"
+              ? "DELETE"
+              : init?.method?.toUpperCase() === "POST"
+                ? "POST"
+                : "GET",
+          path: parsed.pathname,
+          query,
+          body,
+          signal,
+          ...(scope ? { assertCurrent: scope.assertCurrent } : {}),
+        }),
+      timeoutMs,
+      "Browser request",
+      init?.signal,
+    );
 
     if (result.status >= 400) {
       if (result.status === 429) {

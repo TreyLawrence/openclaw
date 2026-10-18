@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, StatementSync } from "node:sqlite";
 import { expect, it, vi } from "vitest";
+import { observeSqliteReadSql } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 import { withDoctorSqliteMaintenanceLock } from "../../commands/doctor-sqlite-maintenance-lock.js";
 import {
   loadExactSessionEntry,
@@ -19,11 +20,7 @@ import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { repairAcpSessionMetaKeysForDoctor } from "./session-meta-doctor.js";
 import { buildAcpDatabaseSessionKey } from "./session-meta-keys.js";
 import { readAcpSessionMetaForEntry } from "./session-meta-readonly.js";
-import {
-  readAcpSessionEntry,
-  readAcpSessionMetaBatch,
-  writeAcpSessionMetaForMigration,
-} from "./session-meta.js";
+import { readAcpSessionEntry, writeAcpSessionMetaForMigration } from "./session-meta.js";
 
 const cfg = { agents: { ownership: "explicit" as const, entries: { main: {} } } };
 const key = "agent:harness:acp:key-repair";
@@ -42,6 +39,33 @@ const meta = {
   state: "idle" as const,
   lastActivityAt: 100,
 };
+
+it.each([undefined, "full"] as const)(
+  "Doctor ACP inspection honors integrity mode %s",
+  async (integrityCheck) => {
+    await withOpenClawTestState({ scenario: "empty" }, async ({ env }) => {
+      stateDatabase.openOpenClawStateDatabase({ env });
+      const reads = observeSqliteReadSql(StatementSync.prototype);
+      try {
+        const report = await repairAcpSessionMetaKeysForDoctor({
+          cfg,
+          env,
+          apply: false,
+          integrityCheck,
+        });
+        expect(report.warnings).toEqual([]);
+        expect(reads.queries).toContain(
+          integrityCheck === "full" ? "PRAGMA integrity_check;" : "PRAGMA quick_check;",
+        );
+        expect(reads.queries).not.toContain(
+          integrityCheck === "full" ? "PRAGMA quick_check;" : "PRAGMA integrity_check;",
+        );
+      } finally {
+        reads.restore();
+      }
+    });
+  },
+);
 
 it.each([
   { source: key, binding: entry.lifecycleRevision, conflicting: true },
@@ -280,17 +304,6 @@ it.each([
       ]);
       expect(readAcpSessionMetaForEntry(input)).toEqual(meta);
       expect(readAcpSessionEntry({ cfg, env, agentId: "main", sessionKey })?.acp).toEqual(meta);
-      const withStaleMetadata = {
-        ...entry,
-        acp: { ...meta, runtimeSessionName: "superseded-embedded" },
-      };
-      expect(
-        readAcpSessionMetaBatch({
-          cfg,
-          env,
-          entries: [{ agentId: "main", sessionKey: storeSessionKey, entry: withStaleMetadata }],
-        }).get(withStaleMetadata),
-      ).toEqual(meta);
       expect(
         await repairAcpSessionMetaKeysForDoctor({
           cfg,

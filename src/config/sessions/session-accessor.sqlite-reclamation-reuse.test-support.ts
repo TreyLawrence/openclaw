@@ -6,9 +6,8 @@ import { createTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import * as workerAdmission from "../../infra/sqlite-worker-operation-admission.js";
 import { sqliteWorkerOwnerProbe as probe } from "../../infra/sqlite-worker-owner-probe.test-support.js";
 import { readOpenClawAgentDatabaseWorkerLeaseReceipt } from "../../state/openclaw-agent-db-lifecycle.js";
-import { invalidateOpenClawAgentDatabaseValidation } from "../../state/openclaw-agent-db-validation-cache.js";
 import { openOpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
-import type { AgentDatabaseRequestExecutionSource } from "../../state/openclaw-agent-execution-contract.js";
+import type { AgentDatabaseRequestExecutionSource } from "../../state/openclaw-agent-execution-admission-contract.js";
 import * as nativeExecution from "../../state/openclaw-agent-execution-native.js";
 import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
@@ -47,12 +46,14 @@ export function createFixture(sessionIds = ["first", "second"], agentId = "main"
 export function observeReclamationWorkers(onSpawn?: (worker: Worker) => void) {
   const spawned: Worker[] = [];
   const create = archiveWorker.createSqliteTranscriptArchiveWorker;
-  vi.spyOn(archiveWorker, "createSqliteTranscriptArchiveWorker").mockImplementation((data) => {
-    const worker = create(data);
-    spawned.push(worker);
-    onSpawn?.(worker);
-    return worker;
-  });
+  vi.spyOn(archiveWorker, "createSqliteTranscriptArchiveWorker").mockImplementation(
+    (data, nativeLocations) => {
+      const worker = create(data, nativeLocations);
+      spawned.push(worker);
+      onSpawn?.(worker);
+      return worker;
+    },
+  );
   return spawned;
 }
 
@@ -63,30 +64,16 @@ export function leasesFor(fixture: ReturnType<typeof createFixture>) {
 }
 
 export function createNativeReclamationSource(
-  fixture: Pick<ReturnType<typeof createFixture>, "database" | "options">,
-  revokeDuringOpen: boolean,
+  options: ReturnType<typeof createFixture>["options"],
 ) {
-  const { database, options } = fixture;
   const context = captureOpenClawStateWorkerContext(options);
   const assertCurrent = () => context.admission.assertCurrent();
-  let revokedDuringOpen = false;
   const source: AgentDatabaseRequestExecutionSource = {
     assertCurrent,
     createAdmission(binding) {
       return () => ({
         nativeLocations: binding.nativeLocations,
         admission: workerAdmission.createSqliteWorkerOperationAdmission((request, grant) => {
-          if (
-            revokeDuringOpen &&
-            !revokedDuringOpen &&
-            request.stage === "prepare" &&
-            isRecord(request.facts) &&
-            isRecord(request.facts.identity) &&
-            request.facts.identity.kind === "file"
-          ) {
-            invalidateOpenClawAgentDatabaseValidation(database.path);
-            revokedDuringOpen = true;
-          }
           binding.authorize(request);
           assertCurrent();
           if (!grant()) {
@@ -96,7 +83,7 @@ export function createNativeReclamationSource(
       });
     },
   };
-  return { source, wasRevokedDuringOpen: () => revokedDuringOpen };
+  return source;
 }
 
 export function observeNativeGenerationRetirement(databasePath: string) {

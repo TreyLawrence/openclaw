@@ -12,21 +12,21 @@ export function subscribeChatPaneStartup(
   context: Pick<ApplicationContext, "placementStartup">,
   getState: () => ChatPageHost | undefined,
 ): () => void {
+  // Admit each accepted initial turn before waking followers parked behind recovery.
   return context.placementStartup.subscribe(() => {
     const state = getState();
     if (state) {
       admitChatSubmission(state, getChatPendingInputs(state)?.page.items);
-      // Project the accepted initial turn before waking followers parked behind recovery.
       if (!parseCatalogSessionKey(state.sessionKey)) {
         void resumeStoredChatOutboxes(state);
       }
-      state.requestUpdate?.();
     }
   });
 }
 
 export function subscribeChatPaneSnapshotInvalidation(
   getState: () => ChatPageHost | undefined,
+  onInvalidate?: () => void,
 ): () => void {
   return subscribeSnapshotInvalidation(({ sessionKey, scopePrefix, reason }) => {
     // Cache eviction must preserve the active transcript and its completed load.
@@ -40,7 +40,7 @@ export function subscribeChatPaneSnapshotInvalidation(
     ) {
       return;
     }
+    onInvalidate?.();
     resetChatHistoryProjection(state);
-    state.requestUpdate?.();
   });
 }

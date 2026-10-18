@@ -19,17 +19,25 @@ export async function cleanupRetiredAgentDatabaseLease(params: {
   stopped: Promise<void>;
   assertOwned(): void;
   lease: OpenClawAgentDatabaseWorkerLeaseReceipt;
+  refusedBeforeAgentOpen?: boolean;
+  closed?: () => ReturnType<typeof readAgentDatabaseClosedReceipt>;
 }): Promise<void> {
   params.assertOwned();
   await params.stopped;
   params.assertOwned();
+  // A confirmed native close already released its lease; exit alone still needs recovery.
+  if (params.closed?.()) {
+    return;
+  }
   const observed = await readDatabasePathIdentity(params.lease.sharedStatePath);
   if (observed.key !== params.lease.sharedStateIdentity) {
     throw new Error("Retired agent cleanup cannot adopt a replacement shared database");
   }
   params.assertOwned();
   // Uncertified retirement cannot lend proof while shared-state cleanup admission waits.
-  invalidateOpenClawAgentDatabaseValidation(params.lease.path);
+  if (!params.refusedBeforeAgentOpen) {
+    invalidateOpenClawAgentDatabaseValidation(params.lease.path);
+  }
   const context = {
     environment: params.context.environment,
     existingSchemaPath: params.context.existingSchemaPath,
@@ -40,6 +48,7 @@ export async function cleanupRetiredAgentDatabaseLease(params: {
     context,
     () => params.assertOwned(),
     observed,
+    params.context.maintenanceScope,
   ).catch((error: unknown) => {
     if (error instanceof Error) {
       error.message += ` (leaseId=${params.lease.leaseId}, path=${params.lease.path})`;
@@ -103,7 +112,8 @@ export function publishAgentDatabaseCloseCheckpoint(
   closed: ReturnType<typeof readAgentDatabaseClosedReceipt>,
   assertCleanupOwned: () => void,
 ): void {
-  if (!closed) {
+  const checkpoint = closed?.receipt.checkpoint;
+  if (!closed || !checkpoint) {
     return;
   }
   const { receipt, identity, lease } = closed;
@@ -113,7 +123,7 @@ export function publishAgentDatabaseCloseCheckpoint(
     assertExistingDatabaseIdentity(pathname, receipt.identity.key);
     assertExistingDatabaseIdentity(identity.nativeLocation, receipt.identity.key);
     assertExistingDatabaseIdentity(lease.sharedStatePath, lease.sharedStateIdentity);
-    publishSqliteWalCheckpointObservation(pathname, receipt.checkpoint);
+    publishSqliteWalCheckpointObservation(pathname, checkpoint);
   } catch {
     // A stale diagnostic must not clear another generation's budget or fail native cleanup.
   }

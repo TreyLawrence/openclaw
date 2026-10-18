@@ -125,6 +125,7 @@ export async function handleDiscordMessageManagementAction(ctx: DiscordMessaging
               active: true,
               seed: `${ctx.accountId}:${channelId}`,
               initialSnapshot: snapshot,
+              toolIcons: true,
             }).getText(),
             {
               maxChars: Math.min(ctx.accountConfig.textChunkLimit ?? 2000, 2000),
@@ -227,12 +228,9 @@ export async function handleDiscordMessageManagementAction(ctx: DiscordMessaging
         },
         ctx.withOpts(),
       );
-      const messages = results.messages;
-      const normalizedMessages = Array.isArray(messages)
-        ? messages.map((group) =>
-            Array.isArray(group) ? group.map((msg) => ctx.normalizeMessage(msg)) : group,
-          )
-        : messages;
+      const normalizedMessages = results.messages.map((group) =>
+        Array.isArray(group) ? group.map((msg) => ctx.normalizeMessage(msg)) : group,
+      );
       return jsonResult({
         ok: true,
         results: {

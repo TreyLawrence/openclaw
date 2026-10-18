@@ -153,8 +153,11 @@ function buildMockAnthropicProvider(baseUrl: string) {
 
 function createChatFinalTracker() {
   const terminals: Record<string, unknown>[] = [];
-  const markerWaiters: { marker: string; resolve: (payload: Record<string, unknown>) => void }[] =
-    [];
+  type TerminalPredicate = (payload: Record<string, unknown>) => boolean;
+  const waiters: {
+    matches: TerminalPredicate;
+    resolve: (payload: Record<string, unknown>) => void;
+  }[] = [];
   const onEvent = (evt: { event?: string; payload?: unknown }) => {
     if (evt.event !== "chat" || typeof evt.payload !== "object" || evt.payload === null) {
       return;
@@ -170,26 +173,25 @@ function createChatFinalTracker() {
       message: payload.message,
     });
     terminals.push(payload);
-    const serialized = JSON.stringify(payload);
-    for (let index = markerWaiters.length - 1; index >= 0; index -= 1) {
-      const waiter = markerWaiters[index];
-      if (waiter && serialized.includes(waiter.marker)) {
-        markerWaiters.splice(index, 1);
+    for (let index = waiters.length - 1; index >= 0; index -= 1) {
+      const waiter = waiters[index];
+      if (waiter?.matches(payload)) {
+        waiters.splice(index, 1);
         waiter.resolve(payload);
       }
     }
   };
-  /** Resolves with the terminal chat broadcast whose payload carries the marker. */
-  const waitForMarker = (marker: string): Promise<Record<string, unknown>> => {
-    const existing = terminals.find((payload) => JSON.stringify(payload).includes(marker));
+  /** Resolves with the first terminal chat broadcast that satisfies the predicate. */
+  const waitForTerminal = (matches: TerminalPredicate): Promise<Record<string, unknown>> => {
+    const existing = terminals.find(matches);
     if (existing) {
       return Promise.resolve(existing);
     }
     return new Promise((resolve) => {
-      markerWaiters.push({ marker, resolve });
+      waiters.push({ matches, resolve });
     });
   };
-  return { onEvent, waitForMarker };
+  return { onEvent, waitForTerminal };
 }
 
 type ProofScenario = {
@@ -437,11 +439,15 @@ describe("PR #156634 real runtime proof", () => {
         expect(heldWaited).toMatchObject({ status: "ok" });
 
         // The queued turn drains, rebinds to generation B, and completes for real.
-        // Queued followups execute under a fresh internal runId (followup-turn-admission
-        // preallocates one) and the client runId's "final" broadcast is only the queue
-        // source settlement, so the drained run's completion signal is the terminal
-        // chat broadcast carrying its reply.
-        const queuedFinal = await chatFinals.waitForMarker(QUEUED_REPLY_MARKER);
+        // Its completion signal is a terminal chat broadcast that either carries the
+        // reply, or settles the client runId after the queued request reached the
+        // provider (terminal payloads may omit the reply; chat.history checks it below).
+        const queuedFinal = await chatFinals.waitForTerminal(
+          (payload) =>
+            JSON.stringify(payload).includes(QUEUED_REPLY_MARKER) ||
+            (payload.runId === queuedTurn.runId &&
+              providerRequests.some((body) => body.includes("PR156634 queued turn"))),
+        );
         proof("queued_turn_terminal", {
           clientRunId: queuedTurn.runId,
           drainedRunId: queuedFinal.runId,

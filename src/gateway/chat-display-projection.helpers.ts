@@ -1,3 +1,4 @@
+import { safeParseJson } from "@openclaw/normalization-core/json-coercion";
 import {
   asOptionalObjectRecord as readObjectRecord,
   asOptionalRecord as readRecord,
@@ -6,7 +7,9 @@ import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { isMeaningfulMediaFact, readPersistedMediaFacts } from "../media/media-facts.js";
 import { isRelativeAssistantMediaReference, splitMediaOutput } from "../media/parse-output.js";
 import { normalizeInputProvenance } from "../sessions/input-provenance.js";
-import { isSuppressedControlReplyText } from "./control-reply-text.js";
+import { isAssistantTextContentBlockType as isAssistantTextContentType } from "../shared/chat-message-content.js";
+
+export { isAssistantTextContentType };
 
 export type RoleContentMessage = {
   role: string;
@@ -84,7 +87,6 @@ export function stripAssistantMediaDirectivesForDisplay(
     .join("\n");
 }
 
-/** Resolve the text cap used when projecting chat history for display. */
 export function resolveEffectiveChatHistoryMaxChars(maxChars?: number): number {
   if (typeof maxChars === "number") {
     return maxChars;
@@ -96,11 +98,20 @@ export function truncateChatHistoryText(
   text: string,
   maxChars: number = DEFAULT_CHAT_HISTORY_TEXT_MAX_CHARS,
   preserveExactPrefix = false,
+  toolResultMaxChars?: number,
 ): { text: string; truncated: boolean } {
-  if (text.length <= maxChars) {
+  let limit = maxChars;
+  if (toolResultMaxChars !== undefined && toolResultMaxChars < Math.min(text.length, maxChars)) {
+    // Complete JSON drives source cards, Canvas, and structured output rendering.
+    const preview = truncateUtf16Safe(text, maxChars);
+    if (!/^\s*[[{]/u.test(preview) || safeParseJson(preview) === undefined) {
+      limit = toolResultMaxChars;
+    }
+  }
+  if (text.length <= limit) {
     return { text, truncated: false };
   }
-  const prefix = truncateUtf16Safe(text, maxChars);
+  const prefix = truncateUtf16Safe(text, limit);
   return {
     text: preserveExactPrefix ? prefix : `${prefix}\n...(truncated)...`,
     truncated: true,
@@ -139,10 +150,6 @@ export function extractAssistantTextForSilentCheck(message: unknown): string | u
   return texts.length > 0 ? texts.join("\n") : undefined;
 }
 
-export function isAssistantTextContentType(type: unknown): boolean {
-  return type === "text" || type === "input_text" || type === "output_text";
-}
-
 export function isAssistantInternalReasoningContentType(type: unknown): boolean {
   return type === "thinking" || type === "reasoning" || type === "redacted_thinking";
 }
@@ -170,22 +177,7 @@ export function shouldPreserveAssistantControlReplyText(message: Record<string, 
   if (isProjectedForwardedMessage(message)) {
     return true;
   }
-  if (!hasAssistantDisplayableNonTextContent(message)) {
-    return false;
-  }
-  const content = message.text ?? message.content;
-  const texts =
-    typeof content === "string"
-      ? [content]
-      : Array.isArray(content)
-        ? content.flatMap((block) => {
-            const typed = readRecord(block);
-            return isAssistantTextContentType(typed?.type) && typeof typed?.text === "string"
-              ? [typed.text]
-              : [];
-          })
-        : [];
-  return texts.length > 0 && texts.every((text) => isSuppressedControlReplyText(text));
+  return hasAssistantDisplayableNonTextContent(message);
 }
 
 export function asRoleContentMessage(message: Record<string, unknown>): RoleContentMessage | null {
@@ -194,6 +186,7 @@ export function asRoleContentMessage(message: Record<string, unknown>): RoleCont
     return null;
   }
   return {
+    ...message,
     role,
     ...(message.content !== undefined
       ? { content: message.content }

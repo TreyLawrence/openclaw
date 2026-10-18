@@ -1,5 +1,6 @@
 import path from "node:path";
 import { toUSVString } from "node:util";
+import { isStringArray } from "@openclaw/normalization-core/record-coerce";
 import { sliceUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { markPrivateDirectoryCreationRefused } from "./private-directory-creation.js";
 import type {
@@ -14,7 +15,9 @@ export const SQLITE_READONLY_WORKER_MAX_BUFFER = 1024 * 1024;
 export type SqliteReadOnlyWorkerMode =
   | "sync"
   | "content-version"
+  | "file-generation"
   | "async"
+  | "metadata"
   | "consolidated"
   | "reclaim"
   | "auth-profile-rows"
@@ -35,11 +38,11 @@ export function isSqliteSnapshotStagingMode(mode: unknown): boolean {
 export type SqliteReadOnlyWorkerResult =
   | { ok: true; location: string }
   | { ok: true; contentVersion: string }
+  | { ok: true; generation: string }
   | { ok: true; warnings: string[] }
   | { ok: false; message: string };
 
 export class SqliteReadOnlyInspectionContentionError extends Error {}
-export class SqliteSnapshotAllocationRefusedError extends Error {}
 
 // Released updater parents require exactly { ok, message }. A negotiated worker
 // protocol can replace this owner-generated tag when those parents are retired.
@@ -81,10 +84,8 @@ export function sqliteReadOnlyWorkerRequestArgs(
       ? undefined
       : options.expectedSourceIdentity;
   if (expected !== undefined) {
-    if (options.mode !== "sync") {
-      throw new Error(
-        "SQLite source identity is supported only for artifact-preserving sync copies",
-      );
+    if (options.mode !== "sync" && options.mode !== "metadata") {
+      throw new Error("SQLite source identity is supported only for sync or metadata snapshots");
     }
     args.push(stagingRoot ?? "", JSON.stringify(readDatabaseFileIdentity(expected)));
   } else if (stagingRoot) {
@@ -123,10 +124,8 @@ export function isSqliteReadOnlyWorkerResult(value: unknown): value is SqliteRea
       "contentVersion" in value &&
       typeof value.contentVersion === "string" &&
       /^(?:[a-f0-9]{64})?$/.test(value.contentVersion)) ||
-    (value.ok === true &&
-      "warnings" in value &&
-      Array.isArray(value.warnings) &&
-      value.warnings.every((warning) => typeof warning === "string")) ||
+    (value.ok === true && "generation" in value && typeof value.generation === "string") ||
+    (value.ok === true && "warnings" in value && isStringArray(value.warnings)) ||
     (value.ok === false && "message" in value && typeof value.message === "string")
   );
 }
@@ -165,7 +164,7 @@ function parseSqliteReadOnlyWorkerResult(
 
 export function readSqliteReadOnlyWorkerValue(
   params: SqliteReadOnlyWorkerOutput,
-  mode: "sync" | "async" | "consolidated" | "content-version",
+  mode: "sync" | "async" | "metadata" | "consolidated" | "content-version" | "file-generation",
 ): string;
 export function readSqliteReadOnlyWorkerValue(
   params: SqliteReadOnlyWorkerOutput,
@@ -212,14 +211,12 @@ export function readSqliteReadOnlyWorkerValue(
       const failure = new SqliteReadOnlyInspectionContentionError(error.message);
       throw allocationRefused ? markPrivateDirectoryCreationRefused(failure) : failure;
     }
-    if (allocationRefused) {
-      throw new SqliteSnapshotAllocationRefusedError(error.message);
-    }
     throw error;
   }
   if (
     (mode === "sync" ||
       mode === "async" ||
+      mode === "metadata" ||
       mode === "consolidated" ||
       isSqliteSnapshotStagingMode(mode)) &&
     "location" in result
@@ -228,6 +225,9 @@ export function readSqliteReadOnlyWorkerValue(
   }
   if (mode === "content-version" && "contentVersion" in result) {
     return result.contentVersion;
+  }
+  if (mode === "file-generation" && "generation" in result) {
+    return result.generation;
   }
   if (mode === "reclaim" && "warnings" in result) {
     return result.warnings;
