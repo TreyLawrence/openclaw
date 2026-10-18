@@ -156,10 +156,10 @@ describe("resolveQueuedReplyExecutionConfig channel scope", () => {
     expect(resolveQueuedReplyRuntimeConfig(scopedResolvedConfig)).toBe(scopedResolvedConfig);
   });
 
-  function activateRuntime(sourceConfig: OpenClawConfig, config: OpenClawConfig) {
+  function activateRuntime(secretSource: OpenClawConfig, config: OpenClawConfig) {
     activateSecretsRuntimeSnapshotState({
       snapshot: {
-        sourceConfig,
+        sourceConfig: secretSource,
         config,
         authStores: [],
         authStoreCredentialsRevision: getRuntimeAuthProfileStoreCredentialsRevision(),
@@ -182,18 +182,18 @@ describe("resolveQueuedReplyExecutionConfig channel scope", () => {
       },
       refreshHandler: null,
     });
-    return resolveQueuedReplyRuntimeConfig(sourceConfig);
+    return resolveQueuedReplyRuntimeConfig(secretSource);
   }
 
   it("keeps queued replies on the activated SecretRef bytes without command-time resolution", async () => {
-    const sourceConfig: OpenClawConfig = {
+    const secretSource: OpenClawConfig = {
       skills: {
         entries: {
           example: { apiKey: { source: "env", provider: "default", id: "EXAMPLE_API_KEY" } },
         },
       },
     };
-    const runtimeConfig = activateRuntime(sourceConfig, {
+    const runtimeConfig = activateRuntime(secretSource, {
       skills: { entries: { example: { apiKey: "activated-key" } } },
     });
     // Mirrors the gateway: refs are materialized only for nonempty target sets.
@@ -208,7 +208,7 @@ describe("resolveQueuedReplyExecutionConfig channel scope", () => {
 
     // Healthy activated bytes leave no scoped channel targets to resolve.
     scopedTargets.mockReturnValue({ targetIds: new Set() });
-    for (const config of [sourceConfig, runtimeConfig, structuredClone(sourceConfig)]) {
+    for (const config of [secretSource, runtimeConfig, structuredClone(secretSource)]) {
       const resolved = await resolveQueuedReplyExecutionConfig(config, {
         originatingChannel: "discord",
       });
@@ -222,14 +222,14 @@ describe("resolveQueuedReplyExecutionConfig channel scope", () => {
   });
 
   it("keeps cold channel-account resolution for activated configs", async () => {
-    const sourceConfig: OpenClawConfig = {
+    const secretSource: OpenClawConfig = {
       skills: {
         entries: {
           example: { apiKey: { source: "env", provider: "default", id: "EXAMPLE_API_KEY" } },
         },
       },
     };
-    const runtimeConfig = activateRuntime(sourceConfig, {
+    const runtimeConfig = activateRuntime(secretSource, {
       skills: { entries: { example: { apiKey: "activated-key" } } },
     });
     // A cold account still carries an unresolved scoped target; the activated
@@ -257,19 +257,19 @@ describe("resolveQueuedReplyExecutionConfig channel scope", () => {
   });
 
   it("adopts a new runtime generation for a previously queued config while preserving explicit overrides", async () => {
-    const sourceConfig: OpenClawConfig = {
+    const secretSource: OpenClawConfig = {
       skills: {
         entries: {
           example: { apiKey: { source: "env", provider: "default", id: "EXAMPLE_API_KEY" } },
         },
       },
     };
-    const queuedConfig = activateRuntime(sourceConfig, {
+    const queuedConfig = activateRuntime(secretSource, {
       skills: { entries: { example: { apiKey: "first-key" } } },
     });
     const queuedSource = getRuntimeConfigSourceSnapshot()!;
     const changedSource: OpenClawConfig = {
-      ...sourceConfig,
+      ...secretSource,
       tools: { updatePlan: true },
     };
     const changedRuntime = activateRuntime(changedSource, {
