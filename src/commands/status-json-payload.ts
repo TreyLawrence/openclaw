@@ -9,7 +9,6 @@ import {
 } from "./status-all/format.js";
 import type { StatusOverviewSurface } from "./status-overview-surface.ts";
 
-/** Combines scan summary, overview surface, services, agents, diagnostics, and optional deep probes. */
 export function buildStatusJsonPayload(params: {
   summary: Record<string, unknown>;
   surface: StatusOverviewSurface;
@@ -26,7 +25,7 @@ export function buildStatusJsonPayload(params: {
   pluginCompatibility?: Array<Record<string, unknown>> | null | undefined;
 }) {
   const channelInfo = resolveStatusUpdateChannelInfo({
-    updateConfigChannel: params.surface.cfg.update?.channel ?? undefined,
+    updateConfigChannel: params.surface.cfg.update?.channel,
     update: params.surface.update,
   });
   const databaseFamilies = describeDatabaseEngineSelection(
