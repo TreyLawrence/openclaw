@@ -545,7 +545,10 @@ describe("foreground cancellation before queue admission", () => {
         );
       // Session-controller admission runs before the foreground reservation; Stop
       // must land while that reservation waits on the held maintenance writer.
-      for (let turn = 0; turn < 50 && !(preemptible && owner.signal.aborted); turn += 1) {
+      for (let turn = 0; turn < 50; turn += 1) {
+        if (preemptible && owner.signal.aborted) {
+          break;
+        }
         await nextTurn();
       }
       abort.abort(reason);
