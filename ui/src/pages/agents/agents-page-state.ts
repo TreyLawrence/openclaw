@@ -47,6 +47,7 @@ import {
 } from "../../lib/model-catalog-store.ts";
 import { projectOwner, projectSource } from "../../lib/reactive/projection.ts";
 import { parseAgentSessionKey } from "../../lib/sessions/session-key.ts";
+import { createAgentConfigActions } from "./agent-config-actions.ts";
 import type { GeneratedAvatar } from "./avatar-picker.tsx";
 import {
   loadAgentFileContent,
@@ -64,7 +65,6 @@ import {
   setIdentityAvatar,
   setIdentityDraftField,
 } from "./identity-actions.ts";
-import { createAgentModelActions } from "./model-config.ts";
 import type { AgentIdentityDraft } from "./panels-overview.tsx";
 import {
   navigateToAgent,
@@ -73,8 +73,7 @@ import {
 } from "./route-navigation.ts";
 import type { AgentsRouteData } from "./route.ts";
 import { createAgentSelectionDrafts } from "./selection-drafts.ts";
-import { clearAgentSkillFilter, createAgentSkillActions, loadAgentSkills } from "./skills.ts";
-import { createAgentToolActions } from "./tool-config.ts";
+import { clearAgentSkillFilter, loadAgentSkills } from "./skills.ts";
 import type { AgentsProps } from "./view.tsx";
 
 type AgentsRequestSources = Partial<Pick<ApplicationContext, "agents" | "agentIdentity">>;
@@ -104,7 +103,6 @@ export function createAgentsPageState(
   let active = true;
   let publish = () => {};
   const [skillsFilter, setSkillsFilter] = createSignal("");
-  const applicationConfig = projectOwner(context.config, (config) => config);
   const identities = projectOwner(context.agentIdentity, (identity) => identity.entries());
   const channels = projectOwner(context.channels, (source) => source.state);
   const navigation = projectOwner(context.navigation, (source) => source.snapshot);
@@ -190,11 +188,13 @@ export function createAgentsPageState(
     unsubscribe: () => void;
   } | null = null;
   let normalizedLocation = "";
-  const configEditor = {
+  const configActions = createAgentConfigActions({
     getRuntimeConfig: () => context.runtimeConfig,
     canUpdate: (agentId: string) =>
       agentId === state.agentsSelectedId && canCall("config.set", "operator.admin"),
-  };
+    getReport: () => state.agentSkillsReport,
+    onPrimaryChanged: () => void refreshVisibleToolsEffectiveForCurrentSession(state),
+  });
   const githubIdentity = createGitHubIdentity({
     runExternalMutation: (task, options) =>
       context.runtimeConfig.runExternalMutation(task, options),
@@ -222,7 +222,13 @@ export function createAgentsPageState(
         stopCatalog?.();
         catalogClient = state.client;
         stopCatalog = catalogClient
-          ? subscribeModelCatalogCache(catalogClient, () => publish())
+          ? subscribeModelCatalogCache(
+              catalogClient,
+              () => publish(),
+              () => ({
+                agentId: state.agentsSelectedId ?? undefined,
+              }),
+            )
           : undefined;
       }
       syncGitHubIdentity(state.agentsSelectedId);
@@ -979,7 +985,6 @@ export function createAgentsPageState(
         identities.read().map((entry) => [entry.agentId, entry]),
       ),
       overview: {
-        applicationConfig: applicationConfig.read(),
         identityDraft: state.identityDraft,
         identityScope: state.requestGeneration,
         identitySaving: state.identitySaving,
@@ -1028,10 +1033,7 @@ export function createAgentsPageState(
           return result;
         },
         onIdentitySave: () => scheduleIdentitySave(0),
-        ...createAgentModelActions({
-          ...configEditor,
-          onPrimaryChanged: () => void refreshVisibleToolsEffectiveForCurrentSession(state),
-        }),
+        ...configActions.models,
         // Availability facts (provider keys added/removed, new models) go
         // stale in the per-agent cache; opening the picker re-reads them,
         // mirroring the chat composer's on-open refresh.
@@ -1049,10 +1051,7 @@ export function createAgentsPageState(
             void loadAgentSkills(state, selectedAgentId);
           }
         },
-        ...createAgentSkillActions({
-          ...configEditor,
-          getReport: () => state.agentSkillsReport,
-        }),
+        ...configActions.skills,
         onClear: (agentId) => clearAgentSkills(agentId),
       },
       tools: {
@@ -1067,7 +1066,7 @@ export function createAgentsPageState(
           context.navigate("profile", { hash: "#settings-profile-github-connections" }),
         runtimeSessionKey: state.sessionKey,
         runtimeSessionMatchesSelectedAgent: selectedAgentId === chatAgentId(),
-        ...createAgentToolActions(configEditor),
+        ...configActions.tools,
       },
       pinnedAgentIds: navigation.read().pinnedAgentIds,
       onTogglePinnedAgent: (agentId) => togglePinnedAgent(context.navigation, agentId),

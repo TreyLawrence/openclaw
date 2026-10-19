@@ -1,9 +1,11 @@
 import { createMemo } from "solid-js";
+import type { AgentSelectElement } from "../../components/agent-select.ts";
 import { registerNewSessionSetupEnglish } from "../../i18n/locales/en-new-session-setup.ts";
 import { normalizeAgentTargetLabel } from "../../lib/agents/display.ts";
 import { canCallGatewayMethod } from "../../lib/gateway-methods.ts";
 import { t } from "../../lib/reactive/i18n.ts";
 import { liveValue } from "../../lib/reactive/live-value.ts";
+import { readSessionMethodAccess } from "../../lib/session-method-access.ts";
 import { normalizeAgentId } from "../../lib/sessions/session-key.ts";
 import * as catalog from "./catalog-target.ts";
 import type { CheckoutChipOptions } from "./checkout-chip.ts";
@@ -29,10 +31,14 @@ registerNewSessionSetupEnglish();
 export function AgentSelect(props: {
   params: AgentSelectOptions;
   ref?: (node: HTMLSpanElement) => void;
+  focusTargetsRef?: AgentSelectElement["focusTargetsRef"];
 }) {
   return (
     <span class="new-session-page__select new-session-page__select--agent" ref={props.ref}>
       <openclaw-agent-select
+        ref={(element) => {
+          element.focusTargetsRef = props.focusTargetsRef;
+        }}
         prop:variant={props.params.variant ?? "compact"}
         prop:options={props.params.agents.map((agent) => ({
           value: normalizeAgentId(agent.id),
@@ -57,7 +63,10 @@ export function AgentSelect(props: {
   );
 }
 
-export function RequiredSessionPlacement(props: { gateway: DraftGatewayState }) {
+export function RequiredSessionPlacement(props: {
+  gateway: DraftGatewayState;
+  retryRef?: (button: HTMLButtonElement) => void;
+}) {
   const profile = () =>
     props.gateway.cloudProfiles.find((candidate) => candidate.id === props.gateway.requiredProfile);
   return (
@@ -76,6 +85,7 @@ export function RequiredSessionPlacement(props: { gateway: DraftGatewayState }) 
         <button
           type="button"
           class="btn btn--sm"
+          ref={props.retryRef}
           onClick={() => void props.gateway.retryRequiredPlacement()}
         >
           {t("common.retry")}
@@ -224,11 +234,10 @@ export function NewSessionPlaceControls(props: { params: NewSessionPlaceControls
       ),
     projectAddAvailable:
       !view().nativeTerminal &&
-      canCallGatewayMethod(
-        props.params.context?.gateway.snapshot,
-        props.params.place.remotePlacement ? "sessions.create" : "projects.add",
-        "operator.write",
-      ),
+      readSessionMethodAccess(props.params.context?.gateway.snapshot, {
+        method: "sessions.create",
+        sessionScope: true,
+      }).allowed,
     remoteProjects: view().browser.projectSearchResult?.projects ?? [],
     selectedRemoteProject: view().browser.remoteProject,
     projectSearchCredentialMissing: view().browser.projectSearchResult?.credential === "missing",

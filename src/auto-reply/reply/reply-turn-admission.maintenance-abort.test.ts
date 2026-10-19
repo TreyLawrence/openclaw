@@ -6,13 +6,13 @@ import { createDeferred } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { createSessionMaintenanceOwner } from "../../agents/session-maintenance/coordinator.js";
 import { replaceSessionEntrySync } from "../../config/sessions/session-accessor.js";
+import { testing } from "../../sessions/session-controller.test-support.js";
 import { closeOpenClawAgentDatabasesForTest } from "../../state/openclaw-agent-db.js";
-import { testing } from "./reply-run-registry.test-support.js";
 import { admitReplyTurn } from "./reply-turn-admission.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 afterEach(() => {
-  testing.resetReplyRunRegistry();
+  testing.resetSessionControllerForTest();
   closeOpenClawAgentDatabasesForTest();
 });
 

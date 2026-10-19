@@ -11,6 +11,7 @@ import type { GatewaySessionRow } from "../../api/types.ts";
 import { chatInputOwnerForContext, type ChatInputRegion } from "../../app/chat-input-owner.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { createQuestionPromptState, listQuestionPrompts } from "../../app/question-prompt.ts";
+import type { GatewayStatusProps } from "../../components/gateway-status.ts";
 import type { SessionPanelToggleSlot } from "../../components/session-panel-toggle-buffer.ts";
 import type {
   BoardCommandEvent,
@@ -309,6 +310,10 @@ export abstract class ChatPaneStateOwner {
     this.headerSessionMutationAbortController.abort();
     this.headerSessionMutationAbortController = new AbortController();
   }
+  protected retireHeaderSessionDrafts(): void {
+    this.headerSessionDraftAbortController.abort();
+    this.headerSessionDraftAbortController = new AbortController();
+  }
   draft?: string = undefined;
   focusComposer = false;
   dashboardExpanded = false;
@@ -329,6 +334,7 @@ export abstract class ChatPaneStateOwner {
   narrow = false;
   mergedChrome = false;
   navDrawerOpen = false;
+  gatewayStatus: GatewayStatusProps | null = null;
   onboarding = false;
   onOpenSplitView?: () => void = undefined;
   onSplitDown?: (paneId: string) => void = undefined;
@@ -463,6 +469,7 @@ export abstract class ChatPaneStateOwner {
   // across a reconnect or pane teardown dismiss itself, matching
   // SessionDataController's own epoch-scoped controller for the sidebar.
   protected headerSessionMutationAbortController = new AbortController();
+  protected headerSessionDraftAbortController = new AbortController();
 
   readonly headerPresentation: {
     renameValue: string;
