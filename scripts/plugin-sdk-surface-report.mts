@@ -288,7 +288,9 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +5: maintainer-requested context-engine transcript watermark reader, its types, and fence error.
       // +3: ControlUiChannelSettingsSnapshot, ControlUiChannelSettingsContext, and
       // ControlUiChannelSettingsView for plugin-owned channel Settings presentations.
-      3810,
+      // +1: the shared message-tool source-reply finality resolver.
+      // +1: awaited web_search policy preparation for harnesses; the sync resolver stays.
+      3812,
       // +2: #154043 adds runWithMcpRequestMetadata and the McpServerRequestContext type.
       env,
     ),
@@ -330,7 +332,9 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +1: the same boot-selected family lookup.
       // +1: the same shared auth-patch application.
       // +1: maintainer-requested context-engine transcript watermark reader.
-      2207,
+      // +1: the shared message-tool source-reply finality resolver, so harnesses apply a run's default.
+      // +1: the same awaited web_search policy preparation.
+      2209,
       // +1: #154043 adds runWithMcpRequestMetadata.
       env,
     ),

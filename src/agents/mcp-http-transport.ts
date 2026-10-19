@@ -2,15 +2,16 @@ import {
   SSEClientTransport,
   SseError,
   type SSEClientTransportOptions,
-} from "@modelcontextprotocol/sdk/client/sse.js";
-import {
   StreamableHTTPClientTransport,
-  StreamableHTTPError,
+  SdkHttpError,
+  SdkErrorCode,
   type StreamableHTTPClientTransportOptions,
-} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/sdk/shared/stdio.js";
-import type { FetchLike, Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { isInitializedNotification, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+  STDIO_DEFAULT_MAX_BUFFER_SIZE,
+  isInitializedNotification,
+  type FetchLike,
+  type Transport,
+  type JSONRPCMessage,
+} from "@modelcontextprotocol/client";
 import { getMcpRequestContext, runWithMcpRequestContext } from "./mcp-request-context.js";
 
 const STREAM_RETRY_EXHAUSTED_RE = /^Maximum reconnection attempts \(\d+\) exceeded\.$/;
@@ -396,12 +397,13 @@ export class OpenClawSSEClientTransport extends OpenClawMcpHttpTransport {
   }
 }
 
-/** Owns Streamable HTTP notification recovery and stateful cleanup around SDK 1.30.0. */
+/** Owns Streamable HTTP notification recovery and stateful cleanup. */
 export class OpenClawStreamableHTTPClientTransport extends OpenClawMcpHttpTransport {
   protected readonly transport: StreamableHTTPClientTransport;
   private readonly url: URL;
   private readonly cleanupFetch: FetchLike;
   private readonly requestInit?: RequestInit;
+  private failedStartupSessionId?: string;
   private pendingExpiredNotificationGet = false;
   private terminatedSessionId?: string;
 
@@ -420,6 +422,15 @@ export class OpenClawStreamableHTTPClientTransport extends OpenClawMcpHttpTransp
       const response = limitMcpHttpResponse(
         await (background ? runWithMcpRequestContext(undefined, request) : request()),
       );
+      if (init?.method === "GET" && !response.ok) {
+        // Notification GETs have no error-body contract. Do not let a body that stays open block recovery.
+        void response.body?.cancel().catch(() => undefined);
+      }
+      if (init?.method === "POST" && !response.ok && this.transport.sessionId === undefined) {
+        // V2 only records successful handshakes. A failed startup can still allocate a session.
+        this.failedStartupSessionId =
+          response.headers.get("mcp-session-id") || this.failedStartupSessionId;
+      }
       if (init?.method === "GET" && response.status === 404 && this.sessionId !== undefined) {
         this.pendingExpiredNotificationGet = true;
       }
@@ -432,7 +443,7 @@ export class OpenClawStreamableHTTPClientTransport extends OpenClawMcpHttpTransp
   }
 
   get sessionId(): string | undefined {
-    return this.transport.sessionId;
+    return this.transport.sessionId ?? this.failedStartupSessionId;
   }
 
   get protocolVersion(): string | undefined {
@@ -448,9 +459,7 @@ export class OpenClawStreamableHTTPClientTransport extends OpenClawMcpHttpTransp
     }
     this.emitError(error);
     const sessionExpired =
-      this.pendingExpiredNotificationGet &&
-      error instanceof StreamableHTTPError &&
-      error.code === 404;
+      this.pendingExpiredNotificationGet && error instanceof SdkHttpError && error.status === 404;
     if (sessionExpired) {
       this.pendingExpiredNotificationGet = false;
     }
@@ -496,9 +505,10 @@ export class OpenClawStreamableHTTPClientTransport extends OpenClawMcpHttpTransp
     // A terminated session is no longer addressable; MCP servers report 404
     // for that id, which is already the desired outcome of cleanup.
     if (!response.ok && response.status !== 404 && response.status !== 405) {
-      throw new StreamableHTTPError(
-        response.status,
+      throw new SdkHttpError(
+        SdkErrorCode.ClientHttpFailedToTerminateSession,
         `Failed to terminate session: ${response.statusText}`,
+        { status: response.status, statusText: response.statusText },
       );
     }
     this.terminatedSessionId = sessionId;
