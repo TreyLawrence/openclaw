@@ -21,6 +21,7 @@ import {
   loadChatComposerState,
   storedChatOutboxScopeKey,
 } from "./composer-persistence.ts";
+import { publishQueuedMessageEdit } from "./queued-message-edit.ts";
 import type { ChatSplitLayout } from "./split-layout-types.ts";
 import { visiblePanesOf } from "./split-layout.ts";
 
@@ -224,6 +225,8 @@ export class ChatPaneComposerHandoff {
     target.custody = this.custody;
     target.scope = target.currentScope();
     target.host.resume();
+    publishQueuedMessageEdit(sourceState);
+    publishQueuedMessageEdit(targetState);
     sourceState.composerDraftChanged?.();
     targetState.composerDraftChanged?.();
   }
@@ -360,20 +363,19 @@ export function replacePaneStagedAttachmentGatewayOwner(
   return nextOwner;
 }
 
-type StagedAttachmentPane = Element & {
-  paneId: string;
+type StagedAttachmentPane = {
+  paneId?: string;
   resumeStagedAttachments?: () => void;
 };
 
 export function resumeStagedPanes(
-  root: ParentNode,
+  panes: Iterable<StagedAttachmentPane>,
   layout: ChatSplitLayout,
   narrow: boolean,
 ): void {
   const visiblePaneIds = new Set(visiblePanesOf(layout, narrow).map((pane) => pane.id));
-  // The page resumes retained native pane hosts across their renderer boundaries.
-  for (const pane of root.querySelectorAll<StagedAttachmentPane>("openclaw-chat-pane")) {
-    if (visiblePaneIds.has(pane.paneId)) {
+  for (const pane of panes) {
+    if (pane.paneId && visiblePaneIds.has(pane.paneId)) {
       pane.resumeStagedAttachments?.();
     }
   }

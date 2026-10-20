@@ -1,4 +1,3 @@
-/** Tool Search catalog compaction for large OpenClaw, MCP, and client tool inventories. */
 import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { Type } from "typebox";
@@ -9,6 +8,7 @@ import {
   attachInternalToolResultContentSource,
   copyInternalToolResultState,
 } from "./runtime/internal-hooks.js";
+import { bindAgentToolReplaySafety } from "./tool-replay-safety.js";
 import { resolveToolResultFailureKind } from "./tool-result-error.js";
 import {
   applyToolCatalogCompaction,
@@ -280,7 +280,6 @@ function resolveSearchParameters(searchDefaultLimit: number): AnyAgentTool["para
   return parameters;
 }
 
-/** Create Tool Search control tools for the current run/session context. */
 export function createToolSearchTools(ctx: ToolSearchToolContext): AnyAgentTool[] {
   const config = resolveToolSearchConfig(ctx.runtimeConfig ?? ctx.config);
   const runtime = new ToolSearchRuntime(ctx, config, { validateInput: true });
@@ -319,7 +318,7 @@ export function createToolSearchTools(ctx: ToolSearchToolContext): AnyAgentTool[
       name: TOOL_DESCRIBE_RAW_TOOL_NAME,
       label: "Tool Describe",
       description:
-        "Load the full schema and metadata for one search result when its input is not already clear.",
+        "Load the full schema and metadata for one tool id or name when its input is not already clear.",
       parameters: describeParameters,
       prepareArguments: prepareToolSearchDispatcherArguments,
       execute: async (toolCallId: string, args: unknown): Promise<AgentToolResult<unknown>> =>
@@ -332,7 +331,8 @@ export function createToolSearchTools(ctx: ToolSearchToolContext): AnyAgentTool[
     {
       name: TOOL_CALL_RAW_TOOL_NAME,
       label: "Tool Call",
-      description: "Call an exact Tool Search result id or name through OpenClaw.",
+      description:
+        "Call an exact Tool Search result id or name through OpenClaw. If arguments are not already clear, call tool_describe with the same id for the full description and schema; do not guess omitted fields from compact input hints.",
       parameters: callParameters,
       prepareArguments: prepareToolSearchDispatcherArguments,
       execute: async (
@@ -382,5 +382,7 @@ export function createToolSearchTools(ctx: ToolSearchToolContext): AnyAgentTool[
         }
       },
     },
-  ];
+  ].map((tool) =>
+    tool.name === TOOL_CALL_RAW_TOOL_NAME ? bindAgentToolReplaySafety(tool, "dispatcher") : tool,
+  );
 }

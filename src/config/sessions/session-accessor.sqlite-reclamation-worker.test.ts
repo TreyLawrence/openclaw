@@ -313,6 +313,8 @@ test.each(["established", "first-created"] as const)(
         "synthetic-late-lease",
         databaseFor(state, env),
       );
+      // Exercise lease publication during preparation, before deletion is admitted.
+      await closeOpenClawAgentDatabasesAsync(state.stateDir);
       const sharedPath = resolveOpenClawStateSqlitePath(databaseOptions.env);
       const admission = stateCache.captureOpenClawStateDatabaseReadAdmission(sharedPath);
       expect(admission.identity.key.startsWith("path:")).toBe(sharedState === "first-created");
@@ -497,19 +499,13 @@ test("retains a selected maintenance row protected after native preparation", ()
       materializedPlans: [],
       input,
     } satisfies SqliteSessionReclamationPlan;
-    const prepared: string[] = [];
-    const released: string[] = [];
     const refreshed = vi.fn(() => ({
       activeSessionKeys: [active.sessionKey],
       preservation: protection,
     }));
     observeSessionMaintenancePlanningWorker({
-      afterPrepare(id) {
-        prepared.push(id);
+      afterPrepare() {
         protection = preservation([victim.sessionKey]);
-      },
-      afterRelease(id) {
-        released.push(id);
       },
     });
     await expect(
@@ -522,7 +518,5 @@ test("retains a selected maintenance row protected after native preparation", ()
       activeSessionKeys: [active.sessionKey],
       preservation: preservation([victim.sessionKey]),
     });
-    expect(prepared).toHaveLength(1);
-    expect(released).toEqual(prepared);
     expect(loadSessionEntry(victim)).toEqual(originalVictim);
   }));

@@ -97,17 +97,19 @@ describe("dashboard default activation and personal layout persistence", () => {
     await import("../../components/board/board-view.ts");
     const { pane } = createDashboardHarness();
     const board = { ...pane.resolveBoardView(), activeTabId: "research" };
+    const resolveBoard = vi.spyOn(pane, "resolveBoardView").mockReturnValue(board);
     const expanded = openDashboardPresentation({ columns: [] }, "expanded");
-    expect(pane.pageBoardWidgetMenu(expanded, board)?.widget.name).toBe("source-map");
+    expect(pane.pageBoardWidgetMenu(expanded)?.widget.name).toBe("source-map");
     expect(
-      pane.pageBoardWidgetMenu(openDashboardPresentation(expanded, "split"), board)?.widget.name,
+      pane.pageBoardWidgetMenu(openDashboardPresentation(expanded, "split"))?.widget.name,
     ).toBe("source-map");
     const split = openDashboardPresentation(expanded, "split");
     const side = promoteSidebarPanel(ensureSidebarConversation(split), "conversation");
-    expect(pane.pageBoardWidgetMenu(side, board)?.widget.name).toBe("source-map");
-    expect(pane.pageBoardWidgetMenu(openSlot(side, "workspace"), board)).toBeUndefined();
-    expect(pane.pageBoardWidgetMenu(closeSlot(side, "dashboard"), board)).toBeUndefined();
-    expect(pane.pageBoardWidgetMenu(expanded, { ...board, activeTabId: "main" })).toBeUndefined();
+    expect(pane.pageBoardWidgetMenu(side)?.widget.name).toBe("source-map");
+    expect(pane.pageBoardWidgetMenu(openSlot(side, "workspace"))).toBeUndefined();
+    expect(pane.pageBoardWidgetMenu(closeSlot(side, "dashboard"))).toBeUndefined();
+    resolveBoard.mockReturnValue({ ...board, activeTabId: "main" });
+    expect(pane.pageBoardWidgetMenu(expanded)).toBeUndefined();
     const narrow = {
       ...board,
       snapshot: {
@@ -117,12 +119,14 @@ describe("dashboard default activation and personal layout persistence", () => {
         ),
       },
     };
-    expect(pane.pageBoardWidgetMenu(expanded, narrow)).toBeUndefined();
+    resolveBoard.mockReturnValue(narrow);
+    expect(pane.pageBoardWidgetMenu(expanded)).toBeUndefined();
+    resolveBoard.mockReturnValue(board);
     pane.visuallyPresented = false;
-    expect(pane.pageBoardWidgetMenu(expanded, board)).toBeUndefined();
+    expect(pane.pageBoardWidgetMenu(expanded)).toBeUndefined();
     pane.visuallyPresented = true;
     pane.state.sessionsResult = null;
-    expect(pane.pageBoardWidgetMenu(expanded, board)).toBeUndefined();
+    expect(pane.pageBoardWidgetMenu(expanded)).toBeUndefined();
   });
 
   it("opens the personal expanded preference through the registered keyboard handler", () => {
@@ -502,11 +506,11 @@ describe("dashboard shared default in the real header Layout menu", () => {
     const h = createDashboardHarness({
       row: session({ boardPresentation: "expanded" }),
     });
+    h.pane.narrow = true;
+    h.pane.paneWidth = 400;
     h.state.updateSidebarLayout(openDashboardPresentation(h.state.sidebarLayout, "split"), {
       persist: false,
     });
-    h.pane.narrow = true;
-    h.pane.paneWidth = 400;
     const menu = await h.header();
     expect(menu.querySelector(defaultAction)?.textContent).toContain(
       t("chat.sidePanel.useViewAsDefault"),

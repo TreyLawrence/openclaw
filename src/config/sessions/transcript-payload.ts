@@ -65,8 +65,8 @@ export type TranscriptEventInsertRow = {
   preparedPayload?: PreparedTranscriptPayload;
 };
 
-// Fourteen bound columns per row stay below SQLite's conservative 999-parameter limit.
-export const TRANSCRIPT_INSERT_BATCH_SIZE = 64;
+// Fourteen bound columns per row use at most 7,168 parameters on either engine.
+export const TRANSCRIPT_INSERT_BATCH_SIZE = 512;
 
 /** Physical payload writes participate in the transcript owner's admitted transaction. */
 export function createTranscriptEventInserter(database: EngineConnection, sessionId: string) {
@@ -316,13 +316,6 @@ const navigationReader = createSqliteQueryCache((database: EngineConnection) =>
   ),
 );
 
-function readNavigation(database: EngineConnection, input: NavigationInput): string | null {
-  const navigation = navigationReader(database)(input)?.navigation_json ?? null;
-  return navigation !== null && Buffer.byteLength(navigation, "utf8") <= MAX_NAVIGATION_BYTES
-    ? navigation
-    : null;
-}
-
 /** Prepare canonical UTF-8 bytes and native query metadata before publishing a transcript row. */
 export function prepareTranscriptPayload(
   database: EngineConnection,
@@ -354,7 +347,7 @@ export function prepareTranscriptPayload(
     return identity;
   }
   const codec = resolveZstdCodec();
-  if (!codec || rawBytes < MIN_COMPRESS_BYTES) {
+  if (rawBytes < MIN_COMPRESS_BYTES) {
     return identity;
   }
   const bytes = Buffer.from(eventJson, "utf8");
@@ -380,7 +373,7 @@ export function prepareTranscriptPayload(
     // Unsupported JSON or projection nesting must not reject existing identity bytes.
     return identity;
   }
-  const navigation = readNavigation(database, { eventJson, reportJson });
+  const navigation = navigationReader(database)({ eventJson, reportJson })?.navigation_json ?? null;
   if (
     navigation === null ||
     compressed.byteLength + Buffer.byteLength(navigation, "utf8") > maximumStoredBytes

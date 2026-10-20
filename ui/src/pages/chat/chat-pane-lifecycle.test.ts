@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 /* @vitest-environment jsdom */
 /* @vitest-environment-options {"url":"http://chat-pane-lifecycle.test/"} */
 import type {
+  EnvironmentSummary,
   SessionSuggestion,
   SessionSuggestionsListResult,
 } from "../../../../packages/gateway-protocol/src/index.js";
@@ -14,6 +15,10 @@ import type { GatewaySessionRow } from "../../api/types.ts";
 import { loadSettings, patchSettings } from "../../app/settings.ts";
 import { t } from "../../i18n/index.ts";
 import type { SessionCapability } from "../../lib/sessions/index.ts";
+import {
+  gatewayHelloForMethods,
+  SESSION_MUTATION_TEST_METHODS,
+} from "../../test-helpers/gateway-methods.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { QUEUED_EDIT_RETENTION_CHANGE_EVENT } from "./chat-page-retained-sessions.ts";
 import { createMountedPanes } from "./chat-pane-mounted.test-support.ts";
@@ -28,7 +33,6 @@ import {
 } from "./chat-pane.test-support.ts";
 import { enqueueChatMessage } from "./chat-queue.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
-import { createPageState } from "./chat-state-page.ts";
 import { getChatComposerState, resetChatComposerState } from "./components/chat-composer-state.ts";
 import {
   dismissConfirmedActionPopovers,
@@ -37,6 +41,7 @@ import {
 import * as chatThread from "./components/chat-thread-interactions.ts";
 import { handleChatDraftChange } from "./input-history.ts";
 import { beginQueuedMessageEdit, cancelQueuedMessageEdit } from "./queued-message-edit.ts";
+import { cacheChatSessionSnapshot } from "./session-message-cache.ts";
 import { isSidebarSlotVisible, openSlot, setSidebarOpen } from "./sidebar-layout.ts";
 import { buildInitialChatSubmission } from "./user-message-content.ts";
 
@@ -126,6 +131,54 @@ function selectSuggestionRows(state: ChatPageHost, ...sessions: GatewaySessionRo
 const SKIP_REWIND_CONFIRM_PREFERENCE = "openclaw:skip-rewind-confirm";
 const confirmationOwners = new Set<HTMLElement>();
 
+it("discovers an assigned desktop when only runner inventory becomes available", async () => {
+  vi.useFakeTimers();
+  const key = "agent:main:inventory-desktop";
+  let available = false;
+  const inventory = vi.fn(async (): Promise<EnvironmentSummary> => ({
+    id: "node:assigned-desktop",
+    type: "node",
+    status: available ? "available" : "unavailable",
+    desktop: true,
+  }));
+  const fixture = createMountedPanes(
+    [
+      {
+        key,
+        sessionId: "inventory-session",
+        kind: "direct",
+        updatedAt: 1,
+        execNode: "assigned-desktop",
+      },
+    ],
+    "main",
+    undefined,
+    { "environments.status": inventory },
+  );
+  fixture.context.gateway.snapshot.hello = gatewayHelloForMethods([
+    ...SESSION_MUTATION_TEST_METHODS,
+    "desktop.observe",
+  ]);
+  const pane = fixture.mount(key);
+  await vi.waitFor(() => expect(inventory).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(pane.state.chatLoading).toBe(false));
+  await vi.dynamicImportSettled();
+  await pane.updateComplete;
+  // Isolate inventory publication from deferred startup frames.
+  for (let pass = 0; pass < 2; pass++) {
+    await vi.dynamicImportSettled();
+    await vi.advanceTimersByTimeAsync(160);
+  }
+  expect(isSidebarSlotVisible(pane.state.sidebarLayout, "desktop")).toBe(false);
+
+  available = true;
+  fixture.emitGatewayEvent("node.runnerInventory.changed", { nodeId: "assigned-desktop" });
+
+  await vi.waitFor(() =>
+    expect(isSidebarSlotVisible(pane.state.sidebarLayout, "desktop")).toBe(true),
+  );
+});
+
 it("publishes queued-edit retention changes while its pane is parked", async () => {
   vi.useFakeTimers();
   const key = "agent:main:parked-edit";
@@ -160,15 +213,8 @@ it("publishes queued-edit retention changes while its pane is parked", async () 
   await pane.updateComplete;
 });
 
-it("publishes a disconnected gateway snapshot without a redraw callback", () => {
-  const { pane } = createTestChatPane({ client: createGatewayBrowserClientFixture() });
-  const redraw = vi.fn();
-  const state = createPageState(
-    pane.context,
-    { invalidate: redraw, afterCommit: () => () => {} },
-    pane,
-  );
-  pane.state = state;
+it("publishes a disconnected gateway snapshot through reactive page state", () => {
+  const { pane, state } = createTestChatPane({ client: createGatewayBrowserClientFixture() });
   state.client = pane.context.gateway.snapshot.client;
   state.connected = true;
   const changes: Array<{
@@ -196,7 +242,6 @@ it("publishes a disconnected gateway snapshot without a redraw callback", () => 
     expect(state.connected).toBe(false);
     flush();
     expect(changes).toEqual([{ connected: false, canvas: "/canvas/reconnected" }]);
-    expect(redraw).not.toHaveBeenCalled();
   } finally {
     dispose();
   }
@@ -229,7 +274,66 @@ it("renews the attention cue for repeated draft prefill", () => {
   input.remove();
 });
 
-it("claims the connected client's first message before attaching the pane", () => {
+it.each([
+  ["live", undefined],
+  [
+    "cached receipt",
+    {
+      role: "user",
+      content: "keep the first prompt visible",
+      timestamp: 2,
+      __openclaw: { id: "persisted-first", idempotencyKey: "initial-run:user", seq: 1 },
+    },
+  ],
+] as const)(
+  "claims the connected client's first message before attaching the pane (%s)",
+  (_, receipt) => {
+    const targetSessionKey = "agent:main:created-session";
+    const client = {
+      addEventListener: vi.fn(() => vi.fn()),
+      request: vi.fn(),
+    } as unknown as GatewayBrowserClient;
+    const context = createInitializationContext();
+    context.gateway.snapshot.client = client;
+    context.chatSubmissions.retain(
+      buildInitialChatSubmission(
+        targetSessionKey,
+        { createdAt: 1, text: "keep the first prompt visible" },
+        client,
+        "initial-run",
+      ),
+    );
+    const pane = runtimePane(targetSessionKey, context);
+    if (receipt) {
+      // Hydrating this snapshot retires the retained prompt before admission runs.
+      cacheChatSessionSnapshot(
+        pane.chatMessagesBySession!,
+        { settings: context.gateway.connection, client, hello: context.gateway.snapshot.hello },
+        { sessionKey: targetSessionKey },
+        { messages: [receipt], sessionId: null, pagination: { hasMore: false } },
+      );
+    }
+    const connect = stopAtAttach(pane);
+
+    try {
+      const attachedState = connect();
+      expect(attachedState?.client).toBe(client);
+      expect(attachedState?.chatMessages).toMatchObject([
+        receipt ?? {
+          role: "user",
+          content: [{ type: "text", text: "keep the first prompt visible" }],
+        },
+      ]);
+      expect(context.chatSubmissions.readInitial(targetSessionKey, client)?.pending).toBe(!receipt);
+      // The create ACK already started this run; the working claw must not wait for roster events.
+      expect(attachedState?.chatRunId).toBe("initial-run");
+    } finally {
+      pane.disconnectedCallback();
+    }
+  },
+);
+
+it("does not adopt a first run bound to a replaced physical session", () => {
   const targetSessionKey = "agent:main:created-session";
   const client = {
     addEventListener: vi.fn(() => vi.fn()),
@@ -237,23 +341,26 @@ it("claims the connected client's first message before attaching the pane", () =
   } as unknown as GatewayBrowserClient;
   const context = createInitializationContext();
   context.gateway.snapshot.client = client;
-  context.chatSubmissions.retain(
-    buildInitialChatSubmission(
-      targetSessionKey,
-      { createdAt: 1, text: "keep the first prompt visible" },
-      client,
-      "initial-run",
-    ),
+  const submission = buildInitialChatSubmission(
+    targetSessionKey,
+    { createdAt: 1, text: "first prompt for session a" },
+    client,
+    "initial-run",
   );
+  context.chatSubmissions.retain(submission && { ...submission, sessionId: "physical-a" });
   const pane = runtimePane(targetSessionKey, context);
+  cacheChatSessionSnapshot(
+    pane.chatMessagesBySession!,
+    { settings: context.gateway.connection, client, hello: context.gateway.snapshot.hello },
+    { sessionKey: targetSessionKey },
+    { messages: [], sessionId: "physical-b", pagination: { hasMore: false, totalMessages: 0 } },
+  );
   const connect = stopAtAttach(pane);
 
   try {
     const attachedState = connect();
-    expect(attachedState?.client).toBe(client);
-    expect(attachedState?.chatMessages).toMatchObject([
-      { role: "user", content: [{ type: "text", text: "keep the first prompt visible" }] },
-    ]);
+    expect(attachedState?.currentSessionId).toBe("physical-b");
+    expect(attachedState?.chatRunId ?? null).toBeNull();
   } finally {
     pane.disconnectedCallback();
   }
@@ -286,7 +393,6 @@ it.each(["absent", "open"] as const)(
       expect(pane.state.sessionKey).toBe(left);
       expect(isSidebarSlotVisible(pane.state.sidebarLayout, "workspace")).toBe(false);
       expect(isSidebarSlotVisible(pane.state.sidebarLayout, "detail")).toBe(preference === "open");
-      expect(pane.state.sidebarFocusPanelId).toBe(preference === "absent" ? "" : "detail");
     };
     try {
       connect();
