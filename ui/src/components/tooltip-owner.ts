@@ -11,8 +11,6 @@ interface TooltipProviderPolicy extends HTMLElement {
   closeTooltip(): void;
 }
 
-const DESCRIBABLE_SELECTOR =
-  'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
 const HOVER_DELAY = 150;
 const RICH_CONTENT_CLOSE_DELAY = 100;
 let nextTooltipId = 0;
@@ -25,6 +23,8 @@ export interface TooltipPolicyProps {
   hoverDismissDelay?: number;
   delay?: number;
   describe?: boolean;
+  /** The described control can differ from the wrapper that owns hover geometry. */
+  descriptionTarget?: () => Element | null;
   /** Read-only cards must not block nearby actions when their surface overlaps them. */
   pointerThrough?: boolean;
   autoSize?: boolean;
@@ -132,11 +132,21 @@ export class TooltipOwner {
     return this.#triggerElement;
   }
   get resolvedPlacement(): OverlayPlacement {
-    const placement = this.options.props().placement ?? "top";
+    const placement = this.options.props().placement ?? this.#inheritedPlacement() ?? "top";
     return (placement === "right-start" || placement === "right") &&
       this.host.ownerDocument.defaultView?.matchMedia?.("(max-width: 640px)").matches
       ? "bottom-start"
       : placement;
+  }
+  /** Edge rails declare one hint side for every control, including adapted titles. */
+  #inheritedPlacement(): OverlayPlacement | undefined {
+    for (const node of composedAncestors(this.#triggerElement)) {
+      const side = node instanceof HTMLElement ? node.dataset.tooltipPlacement : undefined;
+      if (side === "top" || side === "right" || side === "bottom" || side === "left") {
+        return side;
+      }
+    }
+    return undefined;
   }
   refresh() {
     this.#attachTrigger();
@@ -477,9 +487,7 @@ export class TooltipOwner {
     if (!trigger) {
       return null;
     }
-    return trigger.matches(DESCRIBABLE_SELECTOR)
-      ? trigger
-      : (trigger.querySelector(DESCRIBABLE_SELECTOR) ?? trigger);
+    return this.options.props().descriptionTarget?.() ?? trigger;
   }
 
   #syncDescription() {

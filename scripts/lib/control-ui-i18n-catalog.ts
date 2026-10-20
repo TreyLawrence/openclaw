@@ -2,14 +2,18 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildBaseHints } from "../../src/config/schema.hints.js";
+import { PUBLIC_SESSION_COPY } from "../../src/shared/public-session-copy.ts";
 import { configHintTranslationKey } from "../../ui/src/i18n/lib/config-hint-translation.ts";
 import { registerActivityEnglish } from "../../ui/src/i18n/locales/en-activity.ts";
 import { registerAgentsHomeEnglish } from "../../ui/src/i18n/locales/en-agents-home.ts";
+import { registerApprovalsEnglish } from "../../ui/src/i18n/locales/en-approvals.ts";
 import { registerAppsEnglish } from "../../ui/src/i18n/locales/en-apps.ts";
 import { registerBoardWebsiteEnglish } from "../../ui/src/i18n/locales/en-board-website.ts";
+import { registerBoardEnglish } from "../../ui/src/i18n/locales/en-board.ts";
 import { registerBrowserEnglish } from "../../ui/src/i18n/locales/en-browser.ts";
 import { registerChatCameraEnglish } from "../../ui/src/i18n/locales/en-chat-camera.ts";
 import { registerChatCiEnglish } from "../../ui/src/i18n/locales/en-chat-ci.ts";
+import { registerChatCommandResultsEnglish } from "../../ui/src/i18n/locales/en-chat-command-results.ts";
 import { registerChatGoalsEnglish } from "../../ui/src/i18n/locales/en-chat-goals.ts";
 import { registerChatMessageMetadataEnglish } from "../../ui/src/i18n/locales/en-chat-message-metadata.ts";
 import { registerChatProviderReviewEnglish } from "../../ui/src/i18n/locales/en-chat-provider-review.ts";
@@ -25,7 +29,9 @@ import { registerGitHubConnectionsEnglish } from "../../ui/src/i18n/locales/en-g
 import { registerGitHubEnglish } from "../../ui/src/i18n/locales/en-github.ts";
 import { registerLabsEnglish } from "../../ui/src/i18n/locales/en-labs.ts";
 import { registerLinkReaderEnglish } from "../../ui/src/i18n/locales/en-link-reader.ts";
+import { registerLogbookEnglish } from "../../ui/src/i18n/locales/en-logbook.ts";
 import { registerLoginEnglish } from "../../ui/src/i18n/locales/en-login.ts";
+import { registerLogsEnglish } from "../../ui/src/i18n/locales/en-logs.ts";
 import { registerMcpAppEnglish } from "../../ui/src/i18n/locales/en-mcp-app.ts";
 import { registerMcpEnglish } from "../../ui/src/i18n/locales/en-mcp.ts";
 import { registerMeetingsEnglish } from "../../ui/src/i18n/locales/en-meetings.ts";
@@ -40,6 +46,7 @@ import { registerPluginManagementEnglish } from "../../ui/src/i18n/locales/en-pl
 import { registerPortalsEnglish } from "../../ui/src/i18n/locales/en-portals.ts";
 import { registerProcessesEnglish } from "../../ui/src/i18n/locales/en-processes.ts";
 import { registerProfileEnglish } from "../../ui/src/i18n/locales/en-profile.ts";
+import { registerSecretsStoreEnglish } from "../../ui/src/i18n/locales/en-secrets-store.ts";
 import { registerSessionOrganizationEnglish } from "../../ui/src/i18n/locales/en-session-organization.ts";
 import { registerSessionPeopleEnglish } from "../../ui/src/i18n/locales/en-session-people.ts";
 import { registerSessionPlacementEnglish } from "../../ui/src/i18n/locales/en-session-placement.ts";
@@ -72,10 +79,16 @@ const sourceFiles = [
   "en-activity.ts",
   "en-agents-home.ts",
   "en-apps.ts",
+  "en-logbook.ts",
+  "en-logs.ts",
+  "en-approvals.ts",
+  "en-secrets-store.ts",
   "en-board-website.ts",
+  "en-board.ts",
   "en-browser.ts",
   "en-chat-camera.ts",
   "en-chat-ci.ts",
+  "en-chat-command-results.ts",
   "en-chat-goals.ts",
   "en-chat-message-metadata.ts",
   "en-chat-provider-review.ts",
@@ -122,6 +135,10 @@ const sourceFiles = [
   "en-usage.ts",
 ];
 
+export function loadControlUiStartupCatalog(): TranslationMap {
+  return en;
+}
+
 export function loadControlUiSourceCatalog(): TranslationMap {
   const newSession: TranslationMap = {};
   for (const [key, value] of Object.entries(registerNewSessionSetupEnglish.catalog.newSession)) {
@@ -137,13 +154,12 @@ export function loadControlUiSourceCatalog(): TranslationMap {
     }
   }
   const sessionsView: TranslationMap = {};
-  for (const [key, value] of Object.entries(en.sessionsView)) {
+  for (const [key, value] of Object.entries(
+    registerSessionOrganizationEnglish.catalog.sessionsView,
+  )) {
     sessionsView[key] = value;
     if (key === "searchPlaceholder") {
       Object.assign(sessionsView, registerCommandPaletteEnglish.catalog.sessionsView);
-    }
-    if (key === "archiveSession") {
-      Object.assign(sessionsView, registerSessionOrganizationEnglish.catalog.sessionsView);
     }
     if (key === "assignToMe") {
       Object.assign(sessionsView, registerSessionPeopleEnglish.catalog.sessionsView);
@@ -152,6 +168,9 @@ export function loadControlUiSourceCatalog(): TranslationMap {
   const boardWidget: TranslationMap = {};
   for (const [key, value] of Object.entries(en.board.widget)) {
     boardWidget[key] = value;
+    if (key === "remove") {
+      Object.assign(boardWidget, registerBoardEnglish.catalog.board.widget);
+    }
     if (key === "kindWebsite") {
       Object.assign(boardWidget, registerBoardWebsiteEnglish.catalog.board.widget);
     }
@@ -163,7 +182,12 @@ export function loadControlUiSourceCatalog(): TranslationMap {
     // Preserve partial-fragment key order while keeping shared labels eager.
     {
       ...en,
-      custodian: { ...registerPluginManagementEnglish.catalog.custodian, ...en.custodian },
+      secretsStore: registerSecretsStoreEnglish.catalog.secretsStore,
+      custodian: {
+        ...registerPluginManagementEnglish.catalog.custodian,
+        ...en.custodian,
+        autoSetup: registerPluginManagementEnglish.catalog.custodian.autoSetup,
+      },
       chat: {
         ...en.chat,
         commands: registerCommandPaletteEnglish.catalog.chat.commands,
@@ -197,9 +221,14 @@ export function loadControlUiSourceCatalog(): TranslationMap {
     registerActivityEnglish.catalog,
     registerAgentsHomeEnglish.catalog,
     registerAppsEnglish.catalog,
+    registerLogbookEnglish.catalog,
+    registerLogsEnglish.catalog,
+    registerApprovalsEnglish.catalog,
+    registerSecretsStoreEnglish.catalog,
     registerBrowserEnglish.catalog,
     registerChatCameraEnglish.catalog,
     registerChatCiEnglish.catalog,
+    registerChatCommandResultsEnglish.catalog,
     registerChatGoalsEnglish.catalog,
     registerChatProviderReviewEnglish.catalog,
     registerCodeBlocksEnglish.catalog,
@@ -233,6 +262,7 @@ export function loadControlUiSourceCatalog(): TranslationMap {
     registerUpdateActionsEnglish.catalog,
     registerTranscriptsEnglish.catalog,
     registerUsageEnglish.catalog,
+    { publicReader: PUBLIC_SESSION_COPY },
     loadControlUiCoreHintCatalog(),
   );
 }
@@ -241,6 +271,7 @@ export async function readControlUiSourceCatalog(): Promise<string> {
   const sources = await Promise.all(
     [
       ...sourceFiles.map((fileName) => path.join(localesDir, fileName)),
+      path.resolve(localesDir, "../../../../src/shared/public-session-copy.ts"),
       path.resolve(localesDir, "../../../../extensions/active-memory/control-ui.presentation.json"),
       path.resolve(localesDir, "../../../../extensions/memory-wiki/control-ui.presentation.json"),
     ].map((filePath) => readFile(filePath, "utf8")),

@@ -20,7 +20,7 @@ import { useOptionalApplication } from "../lib/reactive/context.ts";
 import { t } from "../lib/reactive/i18n.ts";
 import { listen } from "../lib/reactive/listener.ts";
 import { createParkedProjection } from "../lib/reactive/parked-projection.ts";
-import { projectSource } from "../lib/reactive/projection.ts";
+import { projectOwner } from "../lib/reactive/projection.ts";
 import { defineSolidBridge, type SolidBridgeElement } from "../lib/solid-bridge.ts";
 import { ContentPresentation } from "../lib/solid/presentation.ts";
 import type { ControlUiRegistration } from "./control-ui-capability.ts";
@@ -132,6 +132,7 @@ function PluginViewContent(props: PluginViewProps, host: PluginViewElement) {
     },
     sync,
   );
+  // Registration replacement must abort the outgoing mount before Solid renders its successor.
   onSettled(() =>
     context?.plugins.subscribe(() => {
       const next = resolveRegistration();
@@ -345,20 +346,17 @@ export function PluginSurface<S extends ControlUiSurface>(props: {
   renderCompanion?: () => JSX.Element;
   presented?: boolean;
   enabled?: boolean;
+  replacementRef?: (element: HTMLElement) => void | (() => void);
 }) {
   // Delegated mounts run later inside a foreign plugin and retain the host's owner.
   const owner = getOwner();
   const context = useOptionalApplication();
-  const runtime = projectSource(context?.plugins, {
-    read: (source) => source,
-    subscribe: (source, publish) => source?.subscribe(publish) ?? (() => {}),
-    equality: "revision",
-  });
+  const runtime = context && projectOwner(context.plugins, (source) => source);
   const contentPresented = useContext(ContentPresentation);
   const presented = () => (props.presented ?? true) && contentPresented();
   const selected = createParkedProjection(
     () =>
-      props.enabled === false ? undefined : runtime.read()?.selectedReplacement(props.surface),
+      props.enabled === false ? undefined : runtime?.read().selectedReplacement(props.surface),
     presented,
   );
   const mount = (target: HTMLElement, view: () => JSX.Element) =>
@@ -385,9 +383,14 @@ export function PluginSurface<S extends ControlUiSurface>(props: {
   }
   const mountDefault = (target: HTMLElement) => mount(target, DefaultView);
   const mountCompanion = (target: HTMLElement) => mount(target, () => props.renderCompanion?.());
-  return (
-    <Show when={selected()} fallback={props.renderDefault()}>
+  function ReplacementView() {
+    let host!: HTMLElement;
+    onSettled(() => props.replacementRef?.(host));
+    return (
       <PluginView
+        ref={(element) => {
+          host = element;
+        }}
         data-plugin-composer={props.surface === "composer" ? "" : undefined}
         surface={props.surface}
         props={props.props}
@@ -395,6 +398,11 @@ export function PluginSurface<S extends ControlUiSurface>(props: {
         mountDefaultView={mountDefault}
         mountReplacementCompanion={mountCompanion}
       />
+    );
+  }
+  return (
+    <Show when={selected()} fallback={props.renderDefault()}>
+      <ReplacementView />
     </Show>
   );
 }

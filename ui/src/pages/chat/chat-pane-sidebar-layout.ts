@@ -1,5 +1,6 @@
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { CHAT_PENDING_INPUT_MESSAGE_PREFIX } from "../../../../packages/gateway-protocol/src/schema/chat-history-constants.js";
+import { createChangeListeners } from "../../../../src/shared/listeners.js";
 import { gatewayPresentationScope } from "../../app/gateway-presentation-scope.ts";
 import type { ApplicationGateway } from "../../app/gateway.ts";
 import { ensureCustomElementDefined } from "../../app/lazy-custom-element.ts";
@@ -8,9 +9,7 @@ import {
   retryStaleChunkReloadWhenReachable,
 } from "../../app/stale-chunk-reload.ts";
 import type { LazyViewError } from "../../components/solid/lazy-view-error.tsx";
-import type { BoardProvider } from "../../lib/board/provider.ts";
 import { parseCatalogSessionKey } from "../../lib/sessions/catalog-key.ts";
-import { scopedAgentParamsForSession } from "../../lib/sessions/navigation.ts";
 import { uiConversationMatches } from "../../lib/sessions/session-key.ts";
 import { sidebarPanelDefinitions } from "./chat-pane-embedded-panels.ts";
 import type { ResolvedBoardView } from "./chat-pane-shared.ts";
@@ -19,7 +18,6 @@ import type { ChatPageHost } from "./chat-state-host.ts";
 import { resolveChatAgentId, selectedChatSessionRow } from "./chat-state-route.ts";
 import type { SidebarFullMessageLoader } from "./components/chat-sidebar-content-types.ts";
 import type { SidebarRegionCallbacks } from "./components/chat-sidebar-region-types.ts";
-import { createChatWidgetLayout } from "./session-message-cache.ts";
 import {
   activatePanel,
   toggleSidebarPanelExpanded,
@@ -80,16 +78,13 @@ const LAZY_SIDEBAR_ELEMENTS: Partial<Record<LazyElementKey, LazyElement>> = {
 };
 
 const lazyRuntimes = new Map<LazyElementKey, LazyPanelRuntime>();
-const lazyListeners = new Set<() => void>();
+const lazyListeners = createChangeListeners();
 
 export const lazySidebarElements = {
   get snapshot(): ReadonlyMap<LazyElementKey, LazyPanelRuntime> {
     return lazyRuntimes;
   },
-  subscribe(listener: () => void) {
-    lazyListeners.add(listener);
-    return () => lazyListeners.delete(listener);
-  },
+  subscribe: lazyListeners.subscribe,
 };
 
 export function ensureLazySidebarElement(key: LazyElementKey) {
@@ -120,7 +115,7 @@ export function ensureLazySidebarElement(key: LazyElementKey) {
     })
     .finally(() => {
       delete runtime.pending;
-      lazyListeners.forEach((listener) => listener());
+      lazyListeners.publish();
     });
   return null;
 }
@@ -204,20 +199,6 @@ export function renderSidebarRegion(params: SidebarRegionParams) {
   };
 }
 
-export function chatWidgetRenderOptions(
-  state: ChatPageHost,
-  boardProvider: BoardProvider | undefined,
-) {
-  return {
-    canvasPluginSurfaceUrl: state.canvasPluginSurfaceUrl,
-    boardProvider,
-    widgetLayout: createChatWidgetLayout(state.chatMessagesBySession, state, {
-      sessionKey: state.sessionKey,
-      ...scopedAgentParamsForSession(state, state.sessionKey),
-    }),
-  };
-}
-
 export function resolveSidebarLayoutForBoard(params: {
   board: ResolvedBoardView;
   layout: SidebarLayout;
@@ -232,20 +213,9 @@ export function resolveSidebarLayoutForBoard(params: {
   return fitSidebarLayout(layout, params.paneWidth) ?? layout;
 }
 
-type FullMessageScope = {
-  owner: object;
-  sessionKey?: string;
-  agentId?: string;
-  sessionId?: string;
-  displayedSessionId?: string;
-  lifecycleRevision?: string;
-  authorizationKey?: string;
-};
+type FullMessageScope = ReturnType<typeof readSidebarFullMessageScope>;
 
-function readSidebarFullMessageScope(
-  state: ChatPageHost,
-  gateway: ApplicationGateway,
-): FullMessageScope {
+function readSidebarFullMessageScope(state: ChatPageHost, gateway: ApplicationGateway) {
   const auth = gateway.snapshot.hello?.auth;
   const session = selectedChatSessionRow(state);
   return {
