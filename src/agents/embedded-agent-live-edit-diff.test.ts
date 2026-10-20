@@ -72,7 +72,7 @@ it("keeps streamed edit counts monotonic, throttled, and scoped to tool completi
 });
 
 it("counts canonical write and patch arguments", () => {
-  const { state, update } = progressHarness();
+  const { update } = progressHarness();
   vi.setSystemTime(2_000);
 
   expect(update("write-1", "write", '{"path":"a","content":"one\\ntwo\\n')?.diff).toEqual({
