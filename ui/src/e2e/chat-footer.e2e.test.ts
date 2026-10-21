@@ -8,6 +8,7 @@ import {
   closeChatDetails,
   openChatDetails,
   openDetailsPullRequests,
+  openDesktopPullRequestPage,
 } from "./chat-details.test-support.ts";
 import {
   chatMessage,
@@ -135,6 +136,7 @@ async function verifyFooter(page: Page, width: number, height: number, touch: bo
             branch: "fix/footer-layout",
             title: "Improve chat layout",
             url: "https://github.com/example/demo/pull/42",
+            checksUrl: "https://github.com/example/demo/pull/42/checks",
             state: "open",
             checks: { state: "passing", passed: 12, failed: 0, skipped: 0, running: 0 },
           },
@@ -179,13 +181,18 @@ async function verifyFooter(page: Page, width: number, height: number, touch: bo
   await page.locator(".chat-error").waitFor();
   await waitForChatScrollIdle(page);
 
-  // Details clips overflowing rows; its scrollport must stay above the notice.
+  // The mobile host follows the notice; the desktop inspector stays above it.
   const details = page.getByRole("dialog", { name: "Details", exact: true });
-  const detailsBottom = await details.evaluate((element) => element.getBoundingClientRect().bottom);
-  const noticeTop = await page
-    .locator(".chat-error")
-    .evaluate((element) => element.getBoundingClientRect().top);
-  expect(detailsBottom).toBeLessThanOrEqual(noticeTop);
+  const detailsBounds = (await (
+    touch ? page.locator(".chat-mobile-host") : details
+  ).boundingBox())!;
+  const noticeBounds = (await page.locator(".chat-error").boundingBox())!;
+  if (touch) {
+    expect(noticeBounds.y + noticeBounds.height).toBeLessThanOrEqual(detailsBounds.y);
+    expect(detailsBounds.y + detailsBounds.height).toBeLessThanOrEqual(height);
+  } else {
+    expect(detailsBounds.y + detailsBounds.height).toBeLessThanOrEqual(noticeBounds.y);
+  }
   // Bring the action into view through Details without moving the transcript reader.
   await pullRequest.locator(".chat-pr__link").click({ trial: true });
   const overlap = await pullRequest.evaluate((element) => {
@@ -220,18 +227,27 @@ async function verifyFooter(page: Page, width: number, height: number, touch: bo
   await expectInputReachable(page);
 
   await openDetailsPullRequests(page);
-  await activate(pullRequest.locator(".chat-pr__checks-pill"), touch);
+  const input = touch ? "touch" : "keyboard";
+  const menu = await openDesktopPullRequestPage(pullRequest, "checks", input);
   await gateway.waitForRequest(checksMethod);
-  const menu = page.locator(".chat-pr__checks-menu");
   await menu.waitFor({ state: "visible" });
-  await menu.locator('input[name="autoFix"]:enabled').waitFor({ state: "visible" });
   const menuBounds = (await menu.boundingBox())!;
   const contextBounds = (await page.locator(".chat-footer__context").boundingBox())!;
-  expect(menuBounds.y).toBeLessThan(contextBounds.y);
+  if (touch) {
+    expect(menuBounds.y).toBeGreaterThanOrEqual(contextBounds.y + contextBounds.height);
+  } else {
+    expect(menuBounds.y).toBeLessThan(contextBounds.y);
+  }
   expect(menuBounds.y).toBeGreaterThanOrEqual(0);
   expect(menuBounds.y + menuBounds.height).toBeLessThanOrEqual(height);
-  await menu.getByRole("link", { name: "Open checks on GitHub" }).click({ trial: true });
-
+  await menu
+    .locator('a[href="https://github.com/example/demo/pull/42/checks"]')
+    .click({ trial: true });
+  await openDesktopPullRequestPage(pullRequest, "monitoring", input);
+  const autoFix = menu.getByRole("switch", { name: "Auto-fix CI & address comments", exact: true });
+  await expect.poll(() => autoFix.isEnabled()).toBe(true);
+  await page.keyboard.press("Escape");
+  expect(await menu.isVisible()).toBe(true);
   await page.keyboard.press("Escape");
   await expect.poll(() => menu.isVisible()).toBe(false);
 
@@ -257,7 +273,8 @@ async function verifyFooter(page: Page, width: number, height: number, touch: bo
   if ((await progress.getAttribute("open")) === null) {
     await activate(progress.locator("summary"), touch);
   }
-  await progress.locator(".session-progress-card__body").waitFor({ state: "visible" });
+  await progress.locator(".task-progress-details__plan").waitFor({ state: "visible" });
+  await closeChatDetails(page);
 
   // Use the normal offline queue owner so nothing drains during the layout proof.
   await gateway.setOnline(false);
@@ -280,7 +297,7 @@ async function verifyFooter(page: Page, width: number, height: number, touch: bo
 
   // Progress scrolls inside Details rather than chaining into the queue.
   await openChatDetails(page);
-  const body = progress.locator(".session-progress-card__body");
+  const body = progress.locator(".task-progress-details__plan");
   await body.scrollIntoViewIfNeeded();
   await waitForChatScrollIdle(page);
   const beforeDetailsScroll = await thread.evaluate((element) => element.scrollTop);

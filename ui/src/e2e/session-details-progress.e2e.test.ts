@@ -12,111 +12,17 @@ import {
   controlUiSessionUrl,
   createChatFlowE2eSuite,
   installMockGateway,
-  installPlainHttpClipboardCapture,
-  copiedViaExec,
 } from "./chat-flow.test-support.ts";
 import { openChatSidePanelType } from "./chat-side-panel.test-support.ts";
 
 const suite = createChatFlowE2eSuite();
 
 suite.define(() => {
-  it("reveals Environment copy buttons on row hover, keyboard focus, and touch", async () => {
-    const sessionKey = "agent:main:details-copy";
-    for (const hasTouch of [false, true]) {
-      await suite.withPage(
-        { colorScheme: "dark", viewport: { width: 1728, height: 1000 }, hasTouch },
-        async ({ page }) => {
-          await installPlainHttpClipboardCapture(page);
-          await installMockGateway(page, {
-            sessionKey,
-            agentModel: "example/demo-model",
-            models: [{ id: "demo-model", name: "Demo model", provider: "example" }],
-            methodResponses: {
-              "sessions.list": chatSessionListResponse([
-                {
-                  key: sessionKey,
-                  kind: "direct",
-                  label: "Environment copy controls",
-                  createdActor: { type: "human", id: "ada", label: "Ada" },
-                  spawnedCwd: "/workspace/openclaw",
-                  worktree: {
-                    id: "copy-tree",
-                    repoRoot: "/workspace/openclaw",
-                    branch: "feature/copy-controls",
-                  },
-                  model: "demo-model",
-                  updatedAt: 1,
-                },
-              ]),
-            },
-          });
-          await page.goto(controlUiSessionUrl(suite.server.baseUrl, sessionKey));
-          const details = page.locator(".chat-details");
-          const environment = details.locator(".chat-details__environment");
-          const pathButton = environment.getByRole("button", { name: "Copy path", exact: true });
-          const branchButton = environment.getByRole("button", {
-            name: "Copy branch name",
-            exact: true,
-          });
-          await pathButton.waitFor();
-          const opacity = (button: typeof pathButton) =>
-            button.evaluate((el) => getComputedStyle(el).opacity);
-          const capture = async (name: string) => {
-            const frame = await takeControlUiScreenshotFrame(page, details, [environment], {
-              animations: "disabled",
-              elements: [details],
-            });
-            await writeFile(path.join(suite.artifactDir, name), frame.elements[0]!.png);
-          };
-          if (!hasTouch) {
-            await capture("environment-copy-rest.png");
-            await expect.poll(() => opacity(pathButton)).toBe("0");
-            await expect.poll(() => opacity(branchButton)).toBe("0");
-            const restBounds = await pathButton.boundingBox();
-            await environment
-              .locator(".chat-details__row")
-              .filter({ has: page.getByRole("button", { name: "Copy path", exact: true }) })
-              .hover();
-            await expect.poll(() => opacity(pathButton)).toBe("1");
-            expect(await opacity(branchButton)).toBe("0");
-            expect(await pathButton.boundingBox()).toEqual(restBounds);
-            await capture("environment-copy-hover.png");
-            await page.mouse.move(0, 0);
-            await expect.poll(() => opacity(pathButton)).toBe("0");
-            await environment.locator(":scope > summary").focus();
-            await page.keyboard.press("Tab");
-            await expect
-              .poll(() => pathButton.evaluate((el) => el === document.activeElement))
-              .toBe(true);
-            expect(await opacity(pathButton)).toBe("1");
-            await page.keyboard.press("Tab");
-            await expect
-              .poll(() => branchButton.evaluate((el) => el === document.activeElement))
-              .toBe(true);
-            expect(await opacity(branchButton)).toBe("1");
-            await page.keyboard.press("Shift+Tab");
-            await page.keyboard.press("Enter");
-            await branchButton.focus();
-            await page.keyboard.press("Enter");
-          } else {
-            await expect.poll(() => opacity(pathButton)).toBe("1");
-            expect(await opacity(branchButton)).toBe("1");
-            await pathButton.tap();
-            await branchButton.tap();
-          }
-          await expect
-            .poll(() => copiedViaExec(page))
-            .toEqual(["/workspace/openclaw", "feature/copy-controls"]);
-        },
-      );
-    }
-  });
   it("docks Details in wide conversations and preserves manual intent, drafts, and independent scrolling", async () => {
     const sessionKey = "agent:main:details-progress";
     await suite.withPage(
       { colorScheme: "light", locale: "en-US", viewport: { width: 1728, height: 1000 } },
       async ({ page }) => {
-        await installPlainHttpClipboardCapture(page);
         const gateway = await installMockGateway(page, {
           sessionKey,
           agentModel: "example/demo-model",
@@ -290,13 +196,13 @@ suite.define(() => {
           );
           expect(
             await details.evaluate((root) => {
-              const card = root.querySelector(".session-progress-card")!;
+              const card = root.querySelector('[data-progress-card-placement="details"]')!;
               const group = root.querySelector(".chat-details__group")!;
               return [card, group].every((element) => {
                 const style = getComputedStyle(element);
                 return (
-                  style.borderTopWidth === "1px" &&
-                  style.borderTopStyle === "solid" &&
+                  style.borderTopWidth === (element === card ? "0px" : "1px") &&
+                  (element === card || style.borderTopStyle === "solid") &&
                   style.borderInlineStartWidth === "0px" &&
                   style.borderBottomWidth === "0px" &&
                   style.borderInlineEndWidth === "0px" &&
@@ -309,10 +215,41 @@ suite.define(() => {
           await writeFile(path.join(suite.artifactDir, "panel-" + name), frame.elements[0]!.png);
         };
         const geometry = async (docked: boolean) => {
-          const bounds = await details.boundingBox();
-          const frame = await page.locator(".chat-main__conversation-frame").boundingBox();
-          const conversation = await page.locator(".chat-main__conversation").boundingBox();
-          const footer = await page.locator(".chat-footer").boundingBox();
+          const { bounds, frame, conversation, footer, contained } = await details.evaluate(
+            async (element) => {
+              const document = element.ownerDocument;
+              const frameElement = document.querySelector(".chat-main__conversation-frame");
+              const conversationElement = document.querySelector(".chat-main__conversation");
+              const footerElement = document.querySelector(".chat-footer");
+              // Role/visibility commit before the desktop inset and frame transitions finish.
+              const animations = [
+                element,
+                frameElement,
+                conversationElement,
+                footerElement,
+                frameElement?.closest(".sidebar-region"),
+              ]
+                .flatMap((node) => node?.getAnimations() ?? [])
+                .filter((animation) =>
+                  Number.isFinite(animation.effect?.getComputedTiming().endTime),
+                );
+              await Promise.allSettled(animations.map((animation) => animation.finished));
+              const box = (node: Element | null) => {
+                if (!node) {
+                  return null;
+                }
+                const { x, y, width, height } = node.getBoundingClientRect();
+                return { x, y, width, height };
+              };
+              return {
+                bounds: box(element),
+                frame: box(frameElement),
+                conversation: box(conversationElement),
+                footer: box(footerElement),
+                contained: element.scrollWidth <= element.clientWidth,
+              };
+            },
+          );
           expect(bounds).toBeTruthy();
           expect(frame).toBeTruthy();
           expect(conversation).toBeTruthy();
@@ -327,29 +264,22 @@ suite.define(() => {
           } else {
             expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(footer!.y);
           }
-          expect(await details.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+          expect(contained).toBe(true);
         };
         await geometry(true);
         expect(await details.locator(".chat-details__toolbar").count()).toBe(0);
         expect(await details.locator(".chat-details__participants").count()).toBe(0);
         expect(await details.locator(".chat-details__meta-actions").count()).toBe(0);
-        const environment = details.locator(".chat-details__environment");
-        expect(await environment.textContent()).toContain("openclaw");
+        const environment = details.locator('[data-details-group="environment"]');
+        expect(await environment.textContent()).toContain("feature/session-details");
         expect(await environment.textContent()).not.toContain(
           "/workspace/openclaw/session-details",
-        );
-        expect(await environment.locator(".chat-details__row").first().getAttribute("title")).toBe(
-          "openclaw",
         );
         const context = details.locator(".chat-details__context");
         expect(await context.locator("summary").textContent()).toContain("50%");
         await context.locator("summary").click();
         expect(await context.textContent()).toContain("64k / 128k");
         await context.locator("summary").click();
-        await environment.getByRole("button", { name: "Copy path", exact: true }).click();
-        await expect
-          .poll(() => copiedViaExec(page))
-          .toEqual(["/workspace/openclaw/session-details"]);
         await capture("after.png");
         // A dock is nonmodal: composing, including Escape, must not close it.
         await composer.click();
@@ -370,9 +300,7 @@ suite.define(() => {
         await page.keyboard.press("Tab");
         await expect
           .poll(() =>
-            environment
-              .getByRole("button", { name: "Copy path", exact: true })
-              .evaluate((el) => el === document.activeElement),
+            context.locator(":scope > summary").evaluate((el) => el === document.activeElement),
           )
           .toBe(true);
         await geometry(false);
@@ -393,15 +321,17 @@ suite.define(() => {
         ).toBe(true);
         expect(await session.isVisible()).toBe(true);
         await progressToggle.click();
-        const checks = pullRequest.locator(".chat-pr__checks-pill");
-        await checks.click();
-        await expect
-          .poll(() => pullRequest.locator(".chat-pr__checks-menu").isVisible())
-          .toBe(true);
+        await pullRequest.locator(".chat-pr__actions-trigger").click();
+        const prMenu = pullRequest.locator('.chat-pr__actions [role="menu"]').first();
+        await prMenu.locator('[data-value="checks"]').click();
+        const checksPage = prMenu.locator('.chat-pr-menu__page[aria-label="Checks"]');
+        await expect.poll(() => checksPage.isVisible()).toBe(true);
         await page.keyboard.press("Escape");
-        await expect
-          .poll(() => pullRequest.locator(".chat-pr__checks-menu").isVisible())
-          .toBe(false);
+        await expect.poll(() => checksPage.isVisible()).toBe(false);
+        expect(await prMenu.isVisible()).toBe(true);
+        expect(await details.isVisible()).toBe(true);
+        await page.keyboard.press("Escape");
+        await expect.poll(() => prMenu.isVisible()).toBe(false);
         expect(await details.isVisible()).toBe(true);
         await page.keyboard.press("Escape");
         await expect.poll(() => details.isVisible()).toBe(false);
@@ -431,7 +361,7 @@ suite.define(() => {
         expect(await menu.locator('[role^="menuitem"]').count()).toBe(6);
         await progress.getByRole("button", { name: "Task progress options", exact: true }).click();
         await menu.locator('[data-value="hide"]').click();
-        await expect.poll(() => progress.count()).toBe(0);
+        await expect.poll(() => progress.count()).toBe(1);
         expect(await details.isVisible()).toBe(false);
         const settingsKey = controlUiBundledSettingsStorageKey(suite.server.baseUrl);
         const showSetting = () =>
@@ -456,8 +386,9 @@ suite.define(() => {
         await page.reload();
         await trigger.waitFor();
         await trigger.click();
-        expect(await progress.count()).toBe(0);
-        expect(await gateway.getRequests("progressCard.get")).toHaveLength(0);
+        expect(await progress.count()).toBe(1);
+        expect(await page.locator('[data-progress-card-placement="composer"]').count()).toBe(0);
+        await gateway.waitForRequest("progressCard.get");
         const settingsPage = await page.context().newPage();
         await installMockGateway(settingsPage, { sessionKey });
         await settingsPage.goto(
@@ -473,6 +404,7 @@ suite.define(() => {
           })
           .first();
         await showRow.click();
+        await expect.poll(showSetting).not.toBe(false);
         await expect.poll(() => progress.isVisible()).toBe(true);
         await expect.poll(() => progress.getAttribute("open")).toBeNull();
         await settingsPage.close();
@@ -500,9 +432,34 @@ suite.define(() => {
         await page.getByRole("button", { name: "Panels", exact: true }).waitFor();
         await openChatDetails(page);
         await expect.poll(() => details.getAttribute("role")).toBe("dialog");
-        await geometry(false);
+        const mobileHost = page.locator(".chat-mobile-host");
+        expect(await mobileHost.getAttribute("data-mode")).toBe("dock");
+        const mobileGeometry = await mobileHost.evaluate(async (element) => {
+          const input = element.ownerDocument.querySelector(".agent-chat__input--chat");
+          const animations = [element, element.closest(".sidebar-region"), input]
+            .flatMap((node) => node?.getAnimations() ?? [])
+            .filter((animation) => Number.isFinite(animation.effect?.getComputedTiming().endTime));
+          await Promise.allSettled(animations.map((animation) => animation.finished));
+          const bounds = element.getBoundingClientRect();
+          return {
+            left: bounds.left,
+            right: bounds.right,
+            top: bounds.top,
+            bottom: bounds.bottom,
+            composerBottom: input?.getBoundingClientRect().bottom,
+            contained: element.scrollWidth <= element.clientWidth,
+          };
+        });
+        expect(mobileGeometry.composerBottom).toBeDefined();
+        expect(mobileGeometry.left).toBeGreaterThanOrEqual(0);
+        expect(mobileGeometry.right).toBeLessThanOrEqual(430);
+        expect(mobileGeometry.top).toBeGreaterThanOrEqual(mobileGeometry.composerBottom! - 1);
+        expect(mobileGeometry.bottom).toBeLessThanOrEqual(900);
+        expect(mobileGeometry.contained).toBe(true);
+        expect(await details.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+        expect(await composer.inputValue()).toBe("Keep my draft while I inspect Details.");
         await capture("narrow.png");
-        await details.getByRole("button", { name: "Close details", exact: true }).click();
+        await mobileHost.getByRole("button", { name: "Close", exact: true }).click();
         await page.setViewportSize({ width: 1728, height: 1000 });
         expect(await trigger.getAttribute("aria-expanded")).toBe("false");
         await trigger.click();
@@ -580,7 +537,7 @@ suite.define(() => {
         await capture("empty.png");
         expect(await gateway.getRequests("progressCard.put")).toHaveLength(0);
         expect(await gateway.getRequests("sessions.files.list")).toHaveLength(0);
-        await details.getByRole("button", { name: "Show session files", exact: true }).click();
+        await openChatSidePanelType(page, "Files");
         await gateway.waitForRequest("sessions.files.list");
       },
     );
