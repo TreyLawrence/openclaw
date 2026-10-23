@@ -16,6 +16,7 @@ import {
 import { flush } from "../../test-helpers/solid-settle.ts";
 import {
   createPlacementPane,
+  selectPlacementConfiguration,
   deviceFixture,
   type AsyncRequest,
 } from "./chat-pane-placement.test-support.ts";
@@ -89,6 +90,14 @@ function startMove(pane: ReturnType<typeof createTestChatPane>["pane"], row: Gat
 let dialogs: ReturnType<typeof createModalDialogTestFixture>;
 
 beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
   dialogs = createModalDialogTestFixture();
 });
 
@@ -318,7 +327,7 @@ describe("chat pane placement", () => {
     expect(multiMode?.disabled).toBe(false);
     multiMode?.click();
     flush();
-    selectOption("machine:beast");
+    await selectPlacementConfiguration("Machine", "beast");
     clickButton("Move session");
     await moving;
 
@@ -507,6 +516,11 @@ describe("local session placement actions", () => {
     const session = activePlacementSession();
     const moving = dialogs.track(startMove(pane, session));
     await dialogs.waitFor(() => expect(option("gateway")).not.toBeNull());
+    selectOption("gateway");
+    expect(
+      document.body.querySelector<HTMLButtonElement>('openclaw-modal-dialog button[type="submit"]')!
+        .disabled,
+    ).toBe(false);
     session.placement.generation = 2;
     clickButton("Move session");
     await moving;
@@ -538,5 +552,79 @@ describe("local session placement actions", () => {
     answerWorkerPicker("Continue on worker");
     await moving;
     expect(request).not.toHaveBeenCalledWith("sessions.dispatch", expect.anything());
+  });
+});
+
+describe("cloud placement stop confirmation authority", () => {
+  it.each([
+    "unchanged",
+    "read-only",
+    "method-removed",
+    "replacement",
+    "busy",
+    "offline-device",
+    "new-placement",
+    "removed",
+  ] as const)("uses the current owner state after confirmation (%s)", async (change) => {
+    const { pane, state, request, reconcileMutation } = createPlacementPane(
+      dialogs,
+      undefined,
+      ["operator.write"],
+      ["sessions.reclaim"],
+    );
+    const client = pane.context.gateway.snapshot.client;
+    const session = activePlacementSession();
+    state.sessionKey = session.key;
+    state.currentSessionId = session.sessionId;
+    state.sessionsResult = { ...createSessionsListResult(), sessions: [session] };
+    const stopping = dialogs.track(pane.changeHeaderPlacement(session, "reclaim"));
+    const actions = await waitForConfirmDialogActions();
+    const current = { ...session };
+    if (change === "read-only" || change === "method-removed") {
+      pane.context.gateway.snapshot.hello = gatewayHelloForMethods(
+        change === "method-removed" ? [] : ["sessions.reclaim"],
+        change === "read-only" ? ["operator.read"] : ["operator.write"],
+      );
+    }
+    if (change === "replacement") {
+      current.sessionId = "replacement-session";
+    }
+    if (change === "busy") {
+      current.hasActiveRun = true;
+    }
+    if (change === "offline-device") {
+      current.placement = {
+        ...current.placement,
+        runner: { kind: "device", status: "offline" },
+      };
+    }
+    if (change === "new-placement") {
+      current.placement = { ...current.placement, generation: 2 };
+    }
+    state.sessionsResult = {
+      ...createSessionsListResult(),
+      sessions: change === "removed" ? [] : [current],
+    };
+    expect(pane.context.gateway.snapshot.client).toBe(client);
+    answerConfirmDialog(actions, "confirm");
+    await stopping;
+    if (change === "unchanged") {
+      expect(pane.context.placementStartup.pause).toHaveBeenCalledOnce();
+      expect(request).toHaveBeenCalledWith(
+        "sessions.reclaim",
+        { key: session.key, agentId: "main" },
+        { timeoutMs: null },
+      );
+      expect(reconcileMutation).toHaveBeenCalledWith("main");
+    } else {
+      expect(pane.context.placementStartup.pause).not.toHaveBeenCalled();
+      expect(request).not.toHaveBeenCalledWith(
+        "sessions.reclaim",
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(reconcileMutation).not.toHaveBeenCalled();
+      expect(state.chatError).toBeTruthy();
+    }
   });
 });

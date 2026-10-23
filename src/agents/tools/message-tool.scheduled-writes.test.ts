@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PreparedMessageToolCatalog } from "../../channels/plugins/message-action-discovery.js";
 import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
+import * as commandSecretGateway from "../../cli/command-secret-gateway.js";
 import { clearRuntimeConfigSnapshot, setRuntimeConfigSnapshot } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import * as turns from "../../gateway/message-action-turn-capability.js";
+import * as messageActionRunner from "../../infra/outbound/message-action-runner.js";
 import * as plugins from "../../plugins/runtime.js";
 import * as fixtures from "../../test-utils/channel-plugins.js";
 import { createMessageTool, createMessageToolAsync } from "./message-tool-execution.js";
+import { resolvedMessageSecrets } from "./message-tool-execution.test-support.js";
 
 const target = "channel:100000000000000001";
 const identity = { agentId: "main", runId: "scheduled-message-run" };
@@ -17,6 +20,7 @@ beforeEach(() => {
   registry = plugins.captureActivePluginRegistrySnapshot();
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   grants.splice(0).forEach(turns.revokeMessageActionTurnCapability);
   plugins.restoreActivePluginRegistrySnapshot(registry);
   clearRuntimeConfigSnapshot();
@@ -107,24 +111,22 @@ it("separates generic sends, source reads, and simulated writes", async () => {
   const boundary = new Error("generic send reached outbound dispatch");
   registerDiscord(["send", "read"]);
   const config: OpenClawConfig = { channels: { discord: { token: "fixture-token" } } };
-  const tool = createMessageTool({
-    ...toolOptions(config, capability),
-    runMessageAction: async (input) => {
-      if (input.params.dryRun === true) {
-        message.revoke();
-        return {
-          kind: "send",
-          channel: "discord",
-          action: "send",
-          to: target,
-          handledBy: "plugin",
-          payload: { ok: true },
-          dryRun: true,
-        };
-      }
-      throw boundary;
-    },
+  vi.spyOn(messageActionRunner, "runMessageAction").mockImplementation(async (input) => {
+    if (input.params.dryRun === true) {
+      message.revoke();
+      return {
+        kind: "send",
+        channel: "discord",
+        action: "send",
+        to: target,
+        handledBy: "plugin",
+        payload: { ok: true },
+        dryRun: true,
+      };
+    }
+    throw boundary;
   });
+  const tool = createMessageTool(toolOptions(config, capability));
 
   const execute = (callId: string, params: Record<string, unknown>) =>
     tool.execute(callId, { channel: "discord", target, ...params });
@@ -168,22 +170,21 @@ it.each([
   const secretScopes: Array<ReadonlySet<string> | undefined> = [];
   const defaultAccounts: Array<string | undefined> = [];
   const outboundBoundary = new Error("account selection observed at the outbound boundary");
-  const tool = createMessageTool({
-    ...toolOptions(config, capability),
-    agentAccountId: "delivery",
-    resolveCommandSecretRefsViaGateway: async ({ config: resolvedConfig, allowedPaths }) => {
+  vi.spyOn(commandSecretGateway, "resolveCommandSecretRefsViaGateway").mockImplementation(
+    async ({ config: resolvedConfig, allowedPaths }) => {
       secretScopes.push(allowedPaths);
-      return {
-        resolvedConfig,
-        diagnostics: [],
-        targetStatesByPath: {},
-        hadUnresolvedTargets: false,
-      };
+      return resolvedMessageSecrets(resolvedConfig);
     },
-    runMessageAction: async ({ defaultAccountId }) => {
+  );
+  vi.spyOn(messageActionRunner, "runMessageAction").mockImplementation(
+    async ({ defaultAccountId }) => {
       defaultAccounts.push(defaultAccountId);
       throw outboundBoundary;
     },
+  );
+  const tool = createMessageTool({
+    ...toolOptions(config, capability),
+    agentAccountId: "delivery",
   });
 
   await expect(

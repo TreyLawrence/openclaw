@@ -1,11 +1,12 @@
 import "../../test-utils/prepare-compiled-subprocesses.js";
+import "./database-suite-workers.test-support.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getEnvironmentData } from "node:worker_threads";
 import { Client } from "pg";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createFixtureLifetime } from "../../../test/helpers/fixture-lifetime.js";
 import { parseUpdateRecoveryBackupManifest } from "../../commands/backup-verify-manifest.js";
@@ -15,12 +16,13 @@ import { readBackupEngine } from "../../snapshot/database-backup.js";
 import { OPENCLAW_AGENT_SCHEMA_VERSION } from "../../state/openclaw-agent-db-contract.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "../../state/openclaw-state-db-contract.js";
 import { closeOpenClawStateDatabaseAsync } from "../../state/openclaw-state-db.js";
-import {
-  resolveClientCredentialStorePath,
-  runClientCredentialOperation,
-} from "../client-credential-store.js";
+import { bindFreshClientCredentialStore } from "../client-credential-migration.js";
+import { resolveClientCredentialStorePath } from "../client-credential-paths.js";
+import { runClientCredentialOperation } from "../client-credential-store.js";
+import { generateStoredDeviceIdentity } from "../device-identity-material.js";
 import { acquireGatewayLock } from "../gateway-lock.js";
 import { openNodeSqliteDatabase } from "../node-sqlite.js";
+import { PostgresSyncConnection } from "../postgres-sync/connection.js";
 import { runLegacyStateMigrationSteps } from "../state-migrations.steps.js";
 import { UpdateCandidatePluginPlanSchema } from "../update-candidate-plugins.js";
 import {
@@ -39,6 +41,7 @@ import {
 import { assertUpdateDatabaseEngineContexts } from "../update-database-engine-admission.js";
 import { restoreUpdateDatabaseBackup } from "../update-database-restore.js";
 import { captureUpdateRecoveryBaseline } from "../update-recovery-baseline-capture.js";
+import { withEngineStoreAdmission } from "./admission-scope.js";
 import { agentPortProvider } from "./agent-port.js";
 import { resolveDatabaseEngineSelection } from "./config.js";
 import { installDatabaseEngineSelection } from "./context.js";
@@ -50,6 +53,22 @@ import {
   createTeamReportsPortFixture,
   updatePostgresFamilies as families,
 } from "./update-preflight.conformance.test-support.js";
+
+// mock-isolation: Retain native workers and task transport while selecting their prepared artifacts.
+vi.mock("../worker-task-pool.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../worker-task-pool.js")>();
+  const { resolveBackupNativeWorkerTestOptions } =
+    await import("./backup-native-worker.test-support.js");
+  return {
+    ...actual,
+    WorkerTaskPool: new Proxy(actual.WorkerTaskPool, {
+      construct(Target, args: ConstructorParameters<typeof actual.WorkerTaskPool>) {
+        return new Target(resolveBackupNativeWorkerTestOptions(args[0]));
+      },
+    }),
+  };
+});
+
 const configured: unknown = getEnvironmentData("openclaw.test.state.conformance.connection");
 const connection = typeof configured === "string" ? configured : undefined;
 // The suite owns shared inputs so a failed case drain prevents their later removal.
@@ -163,18 +182,23 @@ describe.skipIf(!connection)("PostgreSQL updater preflight and exact recovery", 
       }
       createAnchor(shared, storeId, namespace);
       anchorCreated = true;
-      for (const key of [
-        "HOME",
-        "OPENCLAW_STATE_DIR",
-        "OPENCLAW_CONFIG_PATH",
-        "OPENCLAW_DISABLE_BUNDLED_PLUGINS",
-      ]) {
-        vi.stubEnv(key, env[key]);
-      }
       resetDatabaseEngineSelectionForTest();
       installDatabaseEngineSelection(await resolveDatabaseEngineSelection(config, env));
     }),
   );
+
+  beforeEach(() => {
+    // Vitest resets environment stubs before each case, including those set during fixture setup.
+    for (const key of [
+      "HOME",
+      "OPENCLAW_STATE_DIR",
+      "OPENCLAW_CONFIG_PATH",
+      "OPENCLAW_DISABLE_BUNDLED_PLUGINS",
+      "OPENCLAW_BUNDLED_PLUGINS_DIR",
+    ]) {
+      vi.stubEnv(key, env[key]);
+    }
+  });
 
   // A timeout rejects Vitest's wrapper before the original body releases its owner.
   afterEach(() => suiteLifetime.verifyCleanup(() => caseLifetime.cleanup()));
@@ -231,7 +255,7 @@ describe.skipIf(!connection)("PostgreSQL updater preflight and exact recovery", 
       const plan = UpdateCandidatePluginPlanSchema.parse(
         JSON.parse(await fs.readFile(path.join(targetStateDir, inventory.pluginPlan), "utf8")),
       );
-      expect(plan.bindings).toContainEqual(expect.objectContaining({ source: plugin }));
+      expect(Object.keys(plan.pluginPaths)).toContain(plugin);
       const discovery = parseUpdateStateInspectionWorker(
         await inspect("discover"),
         UpdateStateSchemaInspectionPlanSchema,
@@ -354,6 +378,11 @@ describe.skipIf(!connection)("PostgreSQL updater preflight and exact recovery", 
           `INSERT INTO "${namespace}".agent_databases (agent_id, path, schema_version, last_seen_at) VALUES ('registered', $1, $2, 1)`,
           [agent, OPENCLAW_AGENT_SCHEMA_VERSION],
         );
+        await activateUpdatePostgresPluginFixtures(
+          config,
+          env,
+          fileURLToPath(new URL("../../../extensions", import.meta.url)),
+        );
         const pluginRoots: string[] = [];
         // Descriptor loading precedes publishing the complete plugin fixture config.
         vi.stubEnv("OPENCLAW_DISABLE_BUNDLED_PLUGINS", "0");
@@ -447,264 +476,292 @@ describe.skipIf(!connection)("PostgreSQL updater preflight and exact recovery", 
         }
       }));
 
-    it("seals an original recovery baseline containing all PostgreSQL families", () =>
-      caseLifetime.run(async () => {
-        const owner = await acquireGatewayLock({
-          env,
-          role: "sqlite-maintenance",
-          allowInTests: true,
-          timeoutMs: 0,
-        });
-        try {
-          const baseline = await owner!.run(() =>
-            captureUpdateRecoveryBaseline({
-              runId: "postgres-original-baseline",
-              installRoot: root,
-              env,
-              drivers: [],
-              assertCurrent: () => owner!.assertCurrent(),
-              acquisition: { mode: "maintenance-owner" },
-            }),
-          );
-          expect(baseline.diagnostics.databaseWarnings).toEqual([]);
-          const manifest = parseUpdateRecoveryBackupManifest(
-            await fs.readFile(baseline.ref.manifestPath, "utf8"),
-          );
-          expect(manifest).toMatchObject({ schemaVersion: 2, generation: { kind: "baseline" } });
-        } finally {
-          await owner!.release();
-        }
-      }));
-    it("captures a retained PostgreSQL agent and restores local credentials after candidate failure while preserving current update history", () =>
-      caseLifetime.run(async () => {
-        const identity = {
-          identity_key: "node",
-          device_id: "synthetic-local-device",
-          public_key_pem: "synthetic-public-key",
-          private_key_pem: "synthetic-private-key",
-          created_at_ms: 11,
-          updated_at_ms: 12,
-        };
-        const key = {
-          device_id: identity.device_id,
-          role: "v2.synthetic.operator",
-          gateway_scope: "synthetic-gateway",
-        };
-        const token = {
-          device_id: key.device_id,
-          role: key.role,
-          token: "synthetic-original-client-token",
-          scopes_json: '["operator.read"]',
-          updated_at_ms: 13,
-        };
-        const socket = {
-          socket_key: "current" as const,
-          socket_path: path.join(root, "synthetic.sock"),
-          socket_token: "synthetic-original-socket-token",
-          updated_at_ms: 14,
-        };
-        runClientCredentialOperation(env, { kind: "identity.create", identity });
-        runClientCredentialOperation(env, {
-          kind: "token.replace",
-          key,
-          token,
-          expectedToken: null,
-        });
-        runClientCredentialOperation(env, { kind: "socket.create", socket });
-        const owner = await acquireGatewayLock({
-          env,
-          role: "sqlite-maintenance",
-          allowInTests: true,
-          timeoutMs: 0,
-        });
-        let backup: UpdateDatabaseBackup | undefined;
-        try {
-          backup = await owner!.run(() =>
-            createUpdateDatabaseBackup({
-              backupRoot: path.join(root, "rollback"),
-              stateDir,
-              config,
-              env,
-              acquisition: { mode: "maintenance-owner" },
-            }),
-          );
-          expect(backup.warnings).toEqual([]);
-          const capturedAgent = backup.databases.find((entry) => entry.path === agent);
-          expect(capturedAgent).toMatchObject({
-            engine: "postgres",
-            storeId: agentStoreId,
-            namespace: agentNamespace,
+    // Green CI runs 39068774273/39071119824 measured p95 at 92s for five-family capture.
+    it(
+      "seals an original recovery baseline containing all PostgreSQL families",
+      () =>
+        caseLifetime.run(async () => {
+          const owner = await acquireGatewayLock({
+            env,
+            role: "sqlite-maintenance",
+            allowInTests: true,
+            timeoutMs: 0,
           });
-          if (!capturedAgent?.exportDirectory) {
-            throw new Error("Retained agent has no matched PostgreSQL capture");
-          }
-          {
-            using image = openNodeSqliteDatabase(
-              path.join(capturedAgent.exportDirectory, "database.sqlite"),
-              { readOnly: true },
+          try {
+            const baseline = await owner!.run(() =>
+              captureUpdateRecoveryBaseline({
+                runId: "postgres-original-baseline",
+                installRoot: root,
+                env,
+                drivers: [],
+                assertCurrent: () => owner!.assertCurrent(),
+                acquisition: { mode: "maintenance-owner" },
+              }),
             );
-            expect(
-              image
-                .prepare(
-                  "SELECT value_json, blob FROM cache_entries WHERE scope = 'update-conformance' AND key = 'retained'",
-                )
-                .get(),
-            ).toEqual({
-              value_json: agentJson,
-              blob: new Uint8Array(agentBlob),
-            });
+            expect(baseline.diagnostics.databaseWarnings).toEqual([]);
+            const manifest = parseUpdateRecoveryBackupManifest(
+              await fs.readFile(baseline.ref.manifestPath, "utf8"),
+            );
+            expect(manifest).toMatchObject({ schemaVersion: 2, generation: { kind: "baseline" } });
+          } finally {
+            await owner!.release();
           }
-          const local = backup.databases.find(
-            (entry) => entry.path === resolveClientCredentialStorePath(env),
-          );
-          expect(local).toMatchObject({ userVersion: 1 });
-          expect(local?.engine).toBeUndefined();
-          {
-            using captured = openNodeSqliteDatabase(local!.snapshotPath, { readOnly: true });
-            expect(
-              captured.prepare("SELECT socket_token FROM native_exec_socket_credentials").get(),
-            ).toEqual({ socket_token: socket.socket_token });
-          }
-          const migration = await owner!.run(() =>
-            runLegacyStateMigrationSteps([
-              {
-                id: "update-conformance-failure",
-                phase: "shared",
-                source: [],
-                target: [],
-                requiredness: "required",
-                reversibility: "not-applicable",
-                run: async () => {
-                  await client.query(
-                    `UPDATE "${namespace}".config_machine_state SET value_json = '"candidate"' WHERE state_key = 'update.conformance'`,
-                  );
-                  await client.query(
-                    `UPDATE "${namespace}".update_runs SET phase = 'validating', updated_at_ms = 2, reason = 'candidate migration failed', after_json = $1 WHERE run_id = $2`,
-                    [' {"opaque":"\\u0062"} ', runId],
-                  );
-                  for (const store of stores) {
-                    await client.query(
-                      `UPDATE "${store.namespace}"."${store.table}" SET "${store.column}" = 'candidate'`,
-                    );
-                  }
-                  await client.query(
-                    `UPDATE "${agentNamespace}".cache_entries SET value_json = '"candidate"', blob = $1 WHERE scope = 'update-conformance' AND key = 'retained'`,
-                    [Buffer.from([9, 8, 7])],
-                  );
-                  runClientCredentialOperation(env, {
-                    kind: "token.replace",
-                    key,
-                    token: {
-                      ...token,
-                      token: "synthetic-candidate-client-token",
-                      updated_at_ms: 21,
-                    },
-                    expectedToken: token.token,
-                  });
-                  runClientCredentialOperation(env, {
-                    kind: "socket.replace",
-                    socket: {
-                      ...socket,
-                      socket_token: "synthetic-candidate-socket-token",
-                      updated_at_ms: 22,
-                    },
-                    expectedToken: socket.socket_token,
-                  });
-                  throw new Error("candidate migration failed after committed data write");
-                },
-              },
-            ]),
-          );
-          expect(migration.haltedBy?.refusal?.code).toBe("step-threw");
-          expect(
-            (
-              await client.query(
-                `SELECT value_json FROM "${namespace}".config_machine_state WHERE state_key = 'update.conformance'`,
-              )
-            ).rows,
-          ).toEqual([{ value_json: '"candidate"' }]);
-          expect(runClientCredentialOperation(env, { kind: "token.read", key })).toMatchObject({
-            token: { token: "synthetic-candidate-client-token" },
+        }),
+      200_000,
+    );
+    // Green CI runs 39068774273/39071119824 measured p95 at 94s before worker reuse.
+    it(
+      "captures a retained PostgreSQL agent and restores local credentials after candidate failure while preserving current update history",
+      () =>
+        caseLifetime.run(async () => {
+          withEngineStoreAdmission(() => {
+            using anchor = openNodeSqliteDatabase(shared);
+            const identity = anchor.prepare("SELECT store_id FROM openclaw_engine_anchor").get()!;
+            const database = new PostgresSyncConnection(
+              connection!,
+              namespace,
+              anchor,
+              String(identity.store_id),
+            );
+            try {
+              database.runTransaction(() =>
+                bindFreshClientCredentialStore(database, { path: shared, env }),
+              );
+            } finally {
+              database.close();
+            }
           });
-        } finally {
-          await owner!.release();
-        }
-        await restoreUpdateDatabaseBackup({
-          backup: backup!,
-          runId,
-          env,
-          assertCurrent() {},
-        });
-        const restored = readBackupEngine(shared);
-        if (restored.engine !== "postgres") {
-          throw new Error("Recovery replaced the PostgreSQL anchor with SQLite data");
-        }
-        namespaces.add(restored.namespace);
-        expect(
-          runClientCredentialOperation(env, { kind: "identity.read", identity_key: "node" }),
-        ).toEqual({ kind: "identity", identity });
-        expect(runClientCredentialOperation(env, { kind: "token.read", key })).toEqual({
-          kind: "token",
-          token,
-        });
-        expect(runClientCredentialOperation(env, { kind: "socket.read" })).toEqual({
-          kind: "socket",
-          socket,
-        });
-        expect(
-          (
-            await client.query(
-              `SELECT value_json FROM "${restored.namespace}".config_machine_state WHERE state_key = 'update.conformance'`,
-            )
-          ).rows,
-        ).toEqual([{ value_json: ' {"value":"baseline","opaque":"\\u0061"} ' }]);
-        expect(
-          (
-            await client.query(
-              `SELECT phase, reason, after_json FROM "${restored.namespace}".update_runs WHERE run_id = $1`,
-              [runId],
-            )
-          ).rows,
-        ).toEqual([
-          {
-            phase: "validating",
-            reason: "candidate migration failed",
-            after_json: ' {"opaque":"\\u0062"} ',
-          },
-        ]);
-        const restoredAgent = readBackupEngine(agent);
-        if (restoredAgent.engine !== "postgres") {
-          throw new Error("Recovery replaced the retained PostgreSQL agent with SQLite data");
-        }
-        namespaces.add(restoredAgent.namespace);
-        expect(
-          (
-            await client.query(
-              `SELECT value_json, blob FROM "${restoredAgent.namespace}".cache_entries WHERE scope = 'update-conformance' AND key = 'retained'`,
-            )
-          ).rows,
-        ).toEqual([{ value_json: agentJson, blob: agentBlob }]);
-        expect(
-          (
-            await client.query(
-              `SELECT path FROM "${restored.namespace}".agent_databases WHERE agent_id = 'registered'`,
-            )
-          ).rows,
-        ).toEqual([{ path: agent }]);
-        for (const store of stores) {
-          const restoredStore = readBackupEngine(store.pathname);
-          if (restoredStore.engine !== "postgres") {
-            throw new Error(`Recovery replaced ${store.provider.id} with SQLite data`);
+          const generated = generateStoredDeviceIdentity(11);
+          const identity = {
+            identity_key: "node",
+            device_id: generated.deviceId,
+            public_key_pem: generated.publicKeyPem,
+            private_key_pem: generated.privateKeyPem,
+            created_at_ms: 11,
+            updated_at_ms: 12,
+          };
+          const key = {
+            device_id: identity.device_id,
+            role: "v2.synthetic.operator",
+            gateway_scope: "synthetic-gateway",
+          };
+          const token = {
+            device_id: key.device_id,
+            role: key.role,
+            token: "synthetic-original-client-token",
+            scopes_json: '["operator.read"]',
+            updated_at_ms: 13,
+          };
+          const socket = {
+            socket_key: "current" as const,
+            socket_path: path.join(root, "synthetic.sock"),
+            socket_token: "synthetic-original-socket-token",
+            updated_at_ms: 14,
+          };
+          runClientCredentialOperation(env, { kind: "identity.create", identity });
+          runClientCredentialOperation(env, {
+            kind: "token.replace",
+            key,
+            token,
+            expectedToken: null,
+          });
+          runClientCredentialOperation(env, { kind: "socket.ensure", fallback: socket });
+          const owner = await acquireGatewayLock({
+            env,
+            role: "sqlite-maintenance",
+            allowInTests: true,
+            timeoutMs: 0,
+          });
+          let backup: UpdateDatabaseBackup | undefined;
+          try {
+            backup = await owner!.run(() =>
+              createUpdateDatabaseBackup({
+                backupRoot: path.join(root, "rollback"),
+                stateDir,
+                config,
+                env,
+                acquisition: { mode: "maintenance-owner" },
+              }),
+            );
+            expect(backup.warnings).toEqual([]);
+            const capturedAgent = backup.databases.find((entry) => entry.path === agent);
+            expect(capturedAgent).toMatchObject({
+              engine: "postgres",
+              storeId: agentStoreId,
+              namespace: agentNamespace,
+            });
+            if (!capturedAgent?.exportDirectory) {
+              throw new Error("Retained agent has no matched PostgreSQL capture");
+            }
+            {
+              using image = openNodeSqliteDatabase(
+                path.join(capturedAgent.exportDirectory, "database.sqlite"),
+                { readOnly: true },
+              );
+              expect(
+                image
+                  .prepare(
+                    "SELECT value_json, blob FROM cache_entries WHERE scope = 'update-conformance' AND key = 'retained'",
+                  )
+                  .get(),
+              ).toEqual({
+                value_json: agentJson,
+                blob: new Uint8Array(agentBlob),
+              });
+            }
+            const local = backup.databases.find(
+              (entry) => entry.path === resolveClientCredentialStorePath(env),
+            );
+            expect(local).toMatchObject({ userVersion: 1 });
+            expect(local?.engine).toBeUndefined();
+            {
+              using captured = openNodeSqliteDatabase(local!.snapshotPath, { readOnly: true });
+              expect(
+                captured.prepare("SELECT socket_token FROM native_exec_socket_credentials").get(),
+              ).toEqual({ socket_token: socket.socket_token });
+            }
+            const migration = await owner!.run(() =>
+              runLegacyStateMigrationSteps([
+                {
+                  id: "update-conformance-failure",
+                  phase: "shared",
+                  source: [],
+                  target: [],
+                  requiredness: "required",
+                  reversibility: "not-applicable",
+                  run: async () => {
+                    await client.query(
+                      `UPDATE "${namespace}".config_machine_state SET value_json = '"candidate"' WHERE state_key = 'update.conformance'`,
+                    );
+                    await client.query(
+                      `UPDATE "${namespace}".update_runs SET phase = 'validating', updated_at_ms = 2, reason = 'candidate migration failed', after_json = $1 WHERE run_id = $2`,
+                      [' {"opaque":"\\u0062"} ', runId],
+                    );
+                    for (const store of stores) {
+                      await client.query(
+                        `UPDATE "${store.namespace}"."${store.table}" SET "${store.column}" = 'candidate'`,
+                      );
+                    }
+                    await client.query(
+                      `UPDATE "${agentNamespace}".cache_entries SET value_json = '"candidate"', blob = $1 WHERE scope = 'update-conformance' AND key = 'retained'`,
+                      [Buffer.from([9, 8, 7])],
+                    );
+                    runClientCredentialOperation(env, {
+                      kind: "token.replace",
+                      key,
+                      token: {
+                        ...token,
+                        token: "synthetic-candidate-client-token",
+                        updated_at_ms: 21,
+                      },
+                      expectedToken: token.token,
+                    });
+                    runClientCredentialOperation(env, {
+                      kind: "socket.ensure",
+                      fallback: {
+                        ...socket,
+                        socket_token: "synthetic-candidate-socket-token",
+                        updated_at_ms: 22,
+                      },
+                      requested: { token: "synthetic-candidate-socket-token" },
+                    });
+                    throw new Error("candidate migration failed after committed data write");
+                  },
+                },
+              ]),
+            );
+            expect(migration.haltedBy?.refusal?.code).toBe("step-threw");
+            expect(
+              (
+                await client.query(
+                  `SELECT value_json FROM "${namespace}".config_machine_state WHERE state_key = 'update.conformance'`,
+                )
+              ).rows,
+            ).toEqual([{ value_json: '"candidate"' }]);
+            expect(runClientCredentialOperation(env, { kind: "token.read", key })).toMatchObject({
+              token: { token: "synthetic-candidate-client-token" },
+            });
+          } finally {
+            await owner!.release();
           }
-          namespaces.add(restoredStore.namespace);
+          await restoreUpdateDatabaseBackup({
+            backup: backup!,
+            runId,
+            env,
+            assertCurrent() {},
+          });
+          const restored = readBackupEngine(shared);
+          if (restored.engine !== "postgres") {
+            throw new Error("Recovery replaced the PostgreSQL anchor with SQLite data");
+          }
+          namespaces.add(restored.namespace);
+          expect(
+            runClientCredentialOperation(env, { kind: "identity.read", identity_key: "node" }),
+          ).toEqual({ kind: "identity", identity });
+          expect(runClientCredentialOperation(env, { kind: "token.read", key })).toEqual({
+            kind: "token",
+            token,
+          });
+          expect(runClientCredentialOperation(env, { kind: "socket.read" })).toEqual({
+            kind: "socket",
+            socket,
+          });
           expect(
             (
               await client.query(
-                `SELECT "${store.column}" AS value FROM "${restoredStore.namespace}"."${store.table}"`,
+                `SELECT value_json FROM "${restored.namespace}".config_machine_state WHERE state_key = 'update.conformance'`,
               )
             ).rows,
-          ).toEqual([{ value: "baseline" }]);
-        }
-      }));
+          ).toEqual([{ value_json: ' {"value":"baseline","opaque":"\\u0061"} ' }]);
+          expect(
+            (
+              await client.query(
+                `SELECT phase, reason, after_json FROM "${restored.namespace}".update_runs WHERE run_id = $1`,
+                [runId],
+              )
+            ).rows,
+          ).toEqual([
+            {
+              phase: "validating",
+              reason: "candidate migration failed",
+              after_json: ' {"opaque":"\\u0062"} ',
+            },
+          ]);
+          const restoredAgent = readBackupEngine(agent);
+          if (restoredAgent.engine !== "postgres") {
+            throw new Error("Recovery replaced the retained PostgreSQL agent with SQLite data");
+          }
+          namespaces.add(restoredAgent.namespace);
+          expect(
+            (
+              await client.query(
+                `SELECT value_json, blob FROM "${restoredAgent.namespace}".cache_entries WHERE scope = 'update-conformance' AND key = 'retained'`,
+              )
+            ).rows,
+          ).toEqual([{ value_json: agentJson, blob: agentBlob }]);
+          expect(
+            (
+              await client.query(
+                `SELECT path FROM "${restored.namespace}".agent_databases WHERE agent_id = 'registered'`,
+              )
+            ).rows,
+          ).toEqual([{ path: agent }]);
+          for (const store of stores) {
+            const restoredStore = readBackupEngine(store.pathname);
+            if (restoredStore.engine !== "postgres") {
+              throw new Error(`Recovery replaced ${store.provider.id} with SQLite data`);
+            }
+            namespaces.add(restoredStore.namespace);
+            expect(
+              (
+                await client.query(
+                  `SELECT "${store.column}" AS value FROM "${restoredStore.namespace}"."${store.table}"`,
+                )
+              ).rows,
+            ).toEqual([{ value: "baseline" }]);
+          }
+        }),
+      200_000,
+    );
   });
 });
