@@ -302,6 +302,11 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp): string {
   return `<!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
+<script>
+  // Match the embedding frame before this document can paint an opaque UA canvas.
+  const initialTheme = new URLSearchParams(window.location.hash.slice(1)).get("theme");
+  if (initialTheme === "light" || initialTheme === "dark") document.documentElement.style.colorScheme = initialTheme;
+</script>
 <title>MCP App sandbox</title>
 <style>html,body{height:100%;margin:0;background:transparent}iframe{display:block;width:100%;height:100%;border:0;background:transparent}</style>
 <body>
@@ -310,9 +315,11 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp): string {
   if (window.self === window.top) throw new Error("invalid MCP App sandbox host");
   let hostOrigin;
   try {
-    const referrer = new URL(document.referrer);
-    if (referrer.protocol !== "http:" && referrer.protocol !== "https:") throw new Error();
-    hostOrigin = referrer.origin;
+    // WebKit sends no referrer when an attached iframe is navigated later, so bind
+    // the browser-reported parent origin; browsers without it keep the referrer.
+    const parent = new URL(location.ancestorOrigins?.[0] ?? document.referrer);
+    if (parent.protocol !== "http:" && parent.protocol !== "https:") throw new Error();
+    hostOrigin = parent.origin;
   } catch { throw new Error("invalid MCP App sandbox parent"); }
   try { void window.top.document; throw new Error("MCP App sandbox isolation failed"); } catch (error) {
     if (error instanceof Error && error.message === "MCP App sandbox isolation failed") throw error;

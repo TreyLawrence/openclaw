@@ -1,3 +1,4 @@
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
 import { openLocalFileSafely, readLocalFileSafely } from "../infra/fs-safe.js";
 import { readCodeModeSkill, type CodeModeSkill } from "./code-mode-skills.js";
@@ -99,6 +100,10 @@ async function readSearchBody(skill: InstalledSkill, maxBytes: number, signal?: 
   const inline = skill.source.readContent;
   if (typeof inline === "string") {
     const prefix = inline.slice(0, maxBytes);
+    // Keep UTF-8 replacement semantics for malformed or byte-truncated text.
+    if (prefix.isWellFormed() && Buffer.byteLength(prefix) <= maxBytes) {
+      return { content: prefix, truncated: prefix.length < inline.length };
+    }
     const bytes = Buffer.from(prefix);
     return {
       content: bytes.subarray(0, maxBytes).toString("utf8"),
@@ -218,7 +223,7 @@ export async function searchInstalledSkills(
   for (const { value } of ranked.slice(0, limit)) {
     const result = {
       name: value.name,
-      description: value.description.slice(0, MAX_DESCRIPTION_CHARS),
+      description: truncateUtf16Safe(value.description, MAX_DESCRIPTION_CHARS),
       location: value.location,
     };
     chars += JSON.stringify(result).length;

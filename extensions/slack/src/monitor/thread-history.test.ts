@@ -1,7 +1,7 @@
 import { WebClient } from "@slack/web-api";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveSlackThreadHistory } from "./thread.js";
+import { resolveSlackChannelHistory, resolveSlackThreadHistory } from "./thread.js";
 
 vi.mock("openclaw/plugin-sdk/runtime-env", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/runtime-env")>()),
@@ -21,6 +21,40 @@ const botMessage = <T extends object>(ts: string, content: T) => ({
 const botText = (text: string) =>
   expect.objectContaining({ text, botId: "BMONITOR", userId: undefined, files: undefined });
 const mrkdwn = (text: string) => ({ type: "mrkdwn", text });
+const section = (text: string) => ({ type: "section", text: mrkdwn(text) });
+
+it("returns bounded channel history chronologically without copying the reversed window", async () => {
+  const client = new WebClient();
+  const messages = [
+    { text: "current", ts: "5.000" },
+    { text: "latest", ts: "4.000" },
+    { text: "excluded", ts: "3.000" },
+    { text: "earlier", ts: "2.000" },
+    { text: "oldest", ts: "1.000" },
+  ];
+  const history = vi
+    .spyOn(client.conversations, "history")
+    .mockResolvedValue({ ok: true, messages });
+  const copies = vi.spyOn(Array.prototype, "toReversed");
+  try {
+    const result = await resolveSlackChannelHistory({
+      channelId: "C1",
+      client,
+      currentMessageTs: "5.000",
+      excludedMessageIds: new Set(["3.000"]),
+      limit: 2,
+    });
+    expect(result.map(({ text, ts }) => ({ text, ts }))).toEqual([
+      { text: "earlier", ts: "2.000" },
+      { text: "latest", ts: "4.000" },
+    ]);
+    expect(messages.map(({ ts }) => ts)).toEqual(["5.000", "4.000", "3.000", "2.000", "1.000"]);
+    expect(copies).not.toHaveBeenCalled();
+  } finally {
+    copies.mockRestore();
+    history.mockRestore();
+  }
+});
 
 function replyPage(start: number, count: number, nextCursor = "") {
   return {
@@ -113,25 +147,20 @@ describe("resolveSlackThreadHistory", () => {
         botMessage("1.000", {
           attachments: [
             {
-              title: "Filesystem on /dev/sda1 has only 14.93% available space left.",
-              fallback: "Alert: filesystem space is low",
-              fields: [{ title: "Host", value: "dc2.ipa.mgt" }],
+              title: "Low disk",
+              fallback: "Alert",
+              fields: [{ title: "Host", value: "example" }],
             },
           ],
         }),
-        botMessage("2.000", {
-          blocks: [{ type: "section", text: mrkdwn("Pod restart rate is high") }],
-        }),
+        botMessage("2.000", { blocks: [section("Restarting")] }),
         botMessage("3.000", {
           attachments: [
             {
               blocks: [
                 { type: "header", text: { type: "plain_text", text: "Alert firing" } },
-                {
-                  type: "section",
-                  fields: [mrkdwn("*host:* dc2.ipa.mgt"), mrkdwn("*device:* /dev/sda1")],
-                },
-                { type: "section", text: mrkdwn("Free space below threshold") },
+                { type: "section", fields: [mrkdwn("*host:* example"), mrkdwn("*device:* disk")] },
+                section("Free space below threshold"),
               ],
             },
           ],
@@ -143,13 +172,9 @@ describe("resolveSlackThreadHistory", () => {
         },
       ],
       expected: [
-        botText(
-          "Filesystem on /dev/sda1 has only 14.93% available space left.\nAlert: filesystem space is low\nHost\ndc2.ipa.mgt",
-        ),
-        botText("Pod restart rate is high"),
-        botText(
-          "Alert firing\n*host:* dc2.ipa.mgt\n*device:* /dev/sda1\nFree space below threshold",
-        ),
+        botText("Low disk\nAlert\nHost\nexample"),
+        botText("Restarting"),
+        botText("Alert firing\n*host:* example\n*device:* disk\nFree space below threshold"),
         expect.objectContaining({ text: "line one\nline two", botId: undefined }),
         expect.objectContaining({ text: "[Slack media attachment]", botId: undefined }),
       ],

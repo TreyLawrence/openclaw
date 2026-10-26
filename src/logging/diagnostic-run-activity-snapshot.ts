@@ -16,15 +16,11 @@ export type DiagnosticSessionActivitySnapshot = {
   activeToolCallId?: string;
   activeToolAgeMs?: number;
   activeToolDeadlineAtMs?: number;
-  /** Latest explicit or quiet allowance across every current-owner tool. */
-  activeToolRecoveryDeadlineAtMs?: number;
   lastProgressAgeMs?: number;
   lastProgressReason?: string;
   repeatedRequestNoProgressAgeMs?: number;
   /** Quiet allowance owned by the current core request generation. */
   activeModelCallRequestTimeoutMs?: number;
-  /** Start-relative diagnostic recovery eligibility, not a client HTTP timeout. */
-  activeModelCallRecoveryDeadlineAtMs?: number;
   /** Absolute quiet deadline validated against the exact executing backend owner. */
   activeBackendLivenessDeadlineAtMs?: number;
   /** Absolute provider retry deadline validated against the live logical run. */
@@ -38,31 +34,25 @@ type SnapshotTool = {
   startedAt: number;
   deadlineAtMs?: number;
 };
-type SnapshotActivity = DiagnosticArgumentChurnActivity &
-  DiagnosticRepeatedRequestActivity & {
-    activeEmbeddedRuns: ReadonlyMap<
-      string,
-      { runId: string; sequence: number; generation?: object }
-    >;
-    activeModelCalls: ReadonlyMap<string, unknown>;
-    activeCoreModelCalls: ReadonlyMap<
-      object,
-      ReadonlyMap<string, { requestTimeoutMs?: number; deadlineAtMs?: number }>
-    >;
-    activeTools: ReadonlyMap<string, SnapshotTool>;
-    lastProgressAt: number;
-    lastProgressReason?: string;
-  };
-
 export function buildDiagnosticSessionActivitySnapshot(
-  activity: SnapshotActivity,
+  activity: DiagnosticArgumentChurnActivity &
+    DiagnosticRepeatedRequestActivity & {
+      activeEmbeddedRuns: ReadonlyMap<
+        string,
+        { runId: string; sequence: number; generation?: object }
+      >;
+      activeModelCalls: ReadonlyMap<string, unknown>;
+      activeCoreModelCalls: ReadonlyMap<object, ReadonlyMap<string, { requestTimeoutMs?: number }>>;
+      activeTools: ReadonlyMap<string, SnapshotTool>;
+      lastProgressAt: number;
+      lastProgressReason?: string;
+    },
   now: number,
 ): DiagnosticSessionActivitySnapshot {
   const currentOwner = resolveCurrentDiagnosticRun(activity.activeEmbeddedRuns.values());
   const currentOwnerRunId = currentOwner?.runId;
   let activeCoreModelCallCount = 0;
   let activeModelCallRequestTimeoutMs: number | undefined;
-  let activeModelCallRecoveryDeadlineAtMs: number | undefined;
   for (const [generation, calls] of activity.activeCoreModelCalls) {
     activeCoreModelCallCount += calls.size;
     if (generation !== currentOwner?.generation) {
@@ -73,12 +63,6 @@ export function buildDiagnosticSessionActivitySnapshot(
         activeModelCallRequestTimeoutMs = Math.max(
           activeModelCallRequestTimeoutMs ?? 0,
           call.requestTimeoutMs,
-        );
-      }
-      if (call.deadlineAtMs !== undefined) {
-        activeModelCallRecoveryDeadlineAtMs = Math.max(
-          activeModelCallRecoveryDeadlineAtMs ?? 0,
-          call.deadlineAtMs,
         );
       }
     }
@@ -93,7 +77,6 @@ export function buildDiagnosticSessionActivitySnapshot(
           : undefined;
   let activeTool: SnapshotTool | undefined;
   let activeToolDeadlineAtMs: number | undefined;
-  let activeToolRecoveryDeadlineAtMs: number | undefined;
   for (const tool of activity.activeTools.values()) {
     if (!activeTool || tool.startedAt < activeTool.startedAt) {
       activeTool = tool;
@@ -102,11 +85,6 @@ export function buildDiagnosticSessionActivitySnapshot(
     // enforced waits own its allowance. Prior runs cannot extend that budget.
     if (currentOwnerRunId !== undefined && tool.runId === currentOwnerRunId) {
       const deadline = tool.deadlineAtMs;
-      const recoveryDeadline = deadline ?? tool.startedAt + BLOCKED_TOOL_CALL_ABORT_FLOOR_MS;
-      activeToolRecoveryDeadlineAtMs = Math.max(
-        activeToolRecoveryDeadlineAtMs ?? recoveryDeadline,
-        recoveryDeadline,
-      );
       if (deadline !== undefined) {
         activeToolDeadlineAtMs = Math.max(activeToolDeadlineAtMs ?? deadline, deadline);
       }
@@ -121,7 +99,6 @@ export function buildDiagnosticSessionActivitySnapshot(
     activeToolAgeMs: activeTool ? Math.max(0, now - activeTool.startedAt) : undefined,
     activeToolDeadlineAtMs:
       currentOwnerRunId === undefined ? activeTool?.deadlineAtMs : activeToolDeadlineAtMs,
-    activeToolRecoveryDeadlineAtMs,
     lastProgressAgeMs: Math.max(0, now - churnProgress.lastProgressAt),
     lastProgressReason: churnProgress.lastProgressReason,
     repeatedRequestNoProgressAgeMs: resolveRepeatedRequestNoProgressAgeMs(
@@ -130,7 +107,6 @@ export function buildDiagnosticSessionActivitySnapshot(
       now,
     ),
     activeModelCallRequestTimeoutMs,
-    activeModelCallRecoveryDeadlineAtMs,
   };
 }
 
