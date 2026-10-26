@@ -10,6 +10,10 @@ title: "Agents"
 
 Manage isolated agents (workspaces + auth + routing). Running `openclaw agents` with no subcommand is equivalent to `openclaw agents list`.
 
+Creation summaries strip terminal escape sequences and show embedded newlines,
+tabs, and carriage returns as `\n`, `\t`, and `\r`. Workspace paths and other
+values in saved configuration and `--json` output retain their original contents.
+
 ## Examples
 
 ```bash
@@ -271,6 +275,7 @@ Each agent workspace can include an `IDENTITY.md` at the workspace root:
 
 - Example path: `~/.openclaw/workspace/IDENTITY.md`
 - `set-identity --from-identity` reads from the workspace root (or an explicit `--identity-file`).
+- Identity files must be valid UTF-8. Invalid encoding fails the import without changing the saved identity.
 
 Avatar paths resolve relative to the workspace root and cannot escape it, even through a symlink.
 

@@ -79,6 +79,14 @@ error. Check the reported cleanup error before retrying. Successful cleanup
 stays quiet, and failures remain best effort. Console diagnostics use the shared
 secret redactor; plain-text console fields are capped at 2,048 characters.
 
+Plugin replacement logs bounded retained-reference snapshots when work queues
+and warns when its drain deadline expires. Structured file records include the
+acquisition owner fields that were available when each reference was created:
+`agentId`, `sessionKey`, `runId`, and `serviceId`. These raw facts identify the
+work holding the previous generation; a missing owner stays `unknown`. Normal
+log egress applies secret redaction, and support bundles omit the nested owner
+details. Plain-text timeout warnings include the bounded structured fields.
+
 The Control UI Logs tab tails this file via the gateway (`logs.tail`). The CLI does the same:
 
 ```bash
@@ -260,7 +268,7 @@ credential-bearing URLs retain their masking.
 
 JSON console output and log tails preserve valid JSON while masking decoded values and serialized record context. Later rules see earlier masks. Structured credential fields use full masks; matched numbers, booleans, and null become the JSON string `"***"`. Log tails retain built-in credential patterns when custom patterns are configured.
 
-Diagnostics exports and captured provider/WebSocket console output retain redaction. `logging.redactPatterns` supplies deployment-specific patterns at these egress boundaries. Log IDs, sizes, and outcomes rather than message text, prompts, tool arguments, or tool results. WebSocket agent-event summaries contain character counts instead of assistant text or tool metadata.
+Formatted health failures, Doctor Gateway connection notes, diagnostics exports, and captured provider/WebSocket console output retain redaction. `logging.redactPatterns` supplies deployment-specific patterns at these egress boundaries. Log IDs, sizes, and outcomes rather than message text, prompts, tool arguments, or tool results. WebSocket agent-event summaries contain character counts instead of assistant text or tool metadata.
 
 ## Gateway WebSocket logs
 

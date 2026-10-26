@@ -40,10 +40,10 @@ const suite = createControlUiE2eSuite({
 const scenarios = (["boot", "direct", "sidebar"] as const).flatMap((entry) =>
   [4, 160].flatMap((count) =>
     [1440, 390].flatMap((width) =>
-      (["no-preference", "reduce"] as const).flatMap((reducedMotion) =>
-        (["light", "dark"] as const).map(
-          (colorScheme) => [entry, count, width, reducedMotion, colorScheme] as const,
-        ),
+      // Theme does not change entry geometry; cover both without replaying every case.
+      (["no-preference", "reduce"] as const).map(
+        (reducedMotion) =>
+          [entry, count, width, reducedMotion, count === 4 ? "light" : "dark"] as const,
       ),
     ),
   ),
@@ -263,7 +263,9 @@ suite.define(() => {
             reducedMotion: reducedMotion === "reduce",
             colorScheme,
           });
-          expect((await gateway.getRequests("chat.startup")).length).toBeGreaterThan(0);
+          expect(
+            (await gateway.getRequests("sessions.messages.subscribe", { key: target })).length,
+          ).toBeGreaterThan(0);
           assertEntryFrames(frames, `entry-${count - 1}`);
         },
       );
